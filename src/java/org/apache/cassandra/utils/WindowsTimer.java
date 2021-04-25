@@ -27,21 +27,24 @@ import com.sun.jna.Native;
 public final class WindowsTimer
 {
     private static final Logger logger = LoggerFactory.getLogger(WindowsTimer.class);
-
+    private static final boolean MISSING_WINDLL;
     static
     {
+        boolean nativeLoaded = false;
         try
         {
             Native.register("winmm");
+            nativeLoaded = true;
         }
         catch (NoClassDefFoundError e)
         {
             logger.warn("JNA not found. winmm.dll cannot be registered. Performance will be negatively impacted on this node.");
         }
-        catch (Exception e)
+        catch (UnsatisfiedLinkError | Exception e)
         {
-            logger.error("Failed to register winmm.dll. Performance will be negatively impacted on this node.");
+            logger.error("Failed to register winmm.dll. Performance will be negatively impacted on this node. " +e.getMessage());
         }
+        MISSING_WINDLL = !nativeLoaded;
     }
 
     private static native int timeBeginPeriod(int period) throws LastErrorException;
@@ -51,7 +54,7 @@ public final class WindowsTimer
 
     public static void startTimerPeriod(int period)
     {
-        if (period == 0)
+        if (period == 0 || MISSING_WINDLL)
             return;
         assert(period > 0);
         if (timeBeginPeriod(period) != 0)
@@ -60,7 +63,7 @@ public final class WindowsTimer
 
     public static void endTimerPeriod(int period)
     {
-        if (period == 0)
+        if (period == 0 || MISSING_WINDLL)
             return;
         assert(period > 0);
         if (timeEndPeriod(period) != 0)
