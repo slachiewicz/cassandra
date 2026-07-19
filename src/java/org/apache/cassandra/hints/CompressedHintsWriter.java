@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -37,7 +38,17 @@ public class CompressedHintsWriter extends HintsWriter
 
     private volatile ByteBuffer compressionBuffer = null;
 
+    /**
+     * @deprecated retained only for binary compatibility with existing callers compiled against the
+     * concrete CRC32 signature; new code should call the {@link Checksum}-typed constructor.
+     */
+    @Deprecated(since = "5.1")
     public CompressedHintsWriter(File directory, HintsDescriptor descriptor, File file, FileChannel channel, int fd, CRC32 globalCRC)
+    {
+        this(directory, descriptor, file, channel, fd, (Checksum) globalCRC);
+    }
+
+    public CompressedHintsWriter(File directory, HintsDescriptor descriptor, File file, FileChannel channel, int fd, Checksum globalCRC)
     {
         super(directory, descriptor, file, channel, fd, globalCRC);
         compressor = descriptor.createCompressor();

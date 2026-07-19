@@ -30,7 +30,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Objects;
@@ -43,6 +43,7 @@ import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.FileInputStreamPlus;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.security.EncryptionContext;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.JsonUtils;
 
 import static org.apache.cassandra.utils.FBUtilities.updateChecksumInt;
@@ -100,7 +101,10 @@ public class CommitLogDescriptor
      */
     public static void writeHeader(ByteBuffer out, CommitLogDescriptor descriptor, Map<String, String> additionalHeaders)
     {
-        CRC32 crc = new CRC32();
+        // This header checksum protects descriptor.version itself, so it can never be selected BY
+        // that version (chicken-and-egg) -- unlike the mutation-body checksum in CommitLogReader,
+        // this one is permanently CRC32, not a Phase 1 placeholder.
+        Checksum crc = ChecksumType.CRC32.newInstance();
         out.putInt(descriptor.version);
         updateChecksumInt(crc, descriptor.version);
         out.putLong(descriptor.id);
@@ -151,7 +155,7 @@ public class CommitLogDescriptor
 
     public static CommitLogDescriptor readHeader(DataInput input, EncryptionContext encryptionContext) throws IOException
     {
-        CRC32 checkcrc = new CRC32();
+        Checksum checkcrc = ChecksumType.CRC32.newInstance();
         int version = input.readInt();
         if (version < VERSION_30)
             throw new IllegalArgumentException("Unsupported pre-3.0 commit log found; cannot read.");

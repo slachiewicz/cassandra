@@ -269,7 +269,7 @@ public class OutboundConnections
         metrics.expiredCallbacks.mark();
     }
 
-    OutboundConnectionSettings template()
+    public OutboundConnectionSettings template()
     {
         return template;
     }

@@ -4743,6 +4743,16 @@ public class DatabaseDescriptor
         conf.internode_compression = compression;
     }
 
+    public static Config.InternodeChecksumType internodeChecksumType()
+    {
+        return conf.internode_checksum_type;
+    }
+
+    public static void setInternodeChecksumType(Config.InternodeChecksumType checksumType)
+    {
+        conf.internode_checksum_type = checksumType;
+    }
+
     public static boolean getInterDCTcpNoDelay()
     {
         return conf.inter_dc_tcp_nodelay;
@@ -6212,6 +6222,12 @@ public class DatabaseDescriptor
     public static StorageCompatibilityMode getStorageCompatibilityMode()
     {
         return storageCompatibilityMode;
+    }
+
+    @VisibleForTesting
+    public static void setStorageCompatibilityMode(StorageCompatibilityMode mode)
+    {
+        storageCompatibilityMode = mode;
     }
 
     public static ParameterizedClass getDefaultCompaction()

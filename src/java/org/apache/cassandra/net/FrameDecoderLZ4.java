@@ -25,6 +25,8 @@ import java.util.zip.CRC32;
 import net.jpountz.lz4.LZ4Factory;
 import net.jpountz.lz4.LZ4SafeDecompressor;
 
+import org.apache.cassandra.utils.ChecksumType;
+
 import io.netty.channel.ChannelPipeline;
 
 import static org.apache.cassandra.utils.Crc.crc24;
@@ -64,7 +66,12 @@ public final class FrameDecoderLZ4 extends FrameDecoderWith8bHeader
 {
     public static FrameDecoderLZ4 fast(BufferPoolAllocator allocator)
     {
-        return new FrameDecoderLZ4(allocator, LZ4Factory.fastestInstance().safeDecompressor());
+        return new FrameDecoderLZ4(allocator, LZ4Factory.fastestInstance().safeDecompressor(), ChecksumType.CRC32);
+    }
+
+    public static FrameDecoderLZ4 fast(BufferPoolAllocator allocator, ChecksumType checksumType)
+    {
+        return new FrameDecoderLZ4(allocator, LZ4Factory.fastestInstance().safeDecompressor(), checksumType);
     }
 
     private static final int HEADER_LENGTH = 8;
@@ -89,11 +96,14 @@ public final class FrameDecoderLZ4 extends FrameDecoderWith8bHeader
     }
 
     private final LZ4SafeDecompressor decompressor;
+    // CASSANDRA-16360 Phase 1 plumbing: see FrameDecoderCrc for why only CRC32 is functionally wired.
+    private final ChecksumType checksumType;
 
-    private FrameDecoderLZ4(BufferPoolAllocator allocator, LZ4SafeDecompressor decompressor)
+    private FrameDecoderLZ4(BufferPoolAllocator allocator, LZ4SafeDecompressor decompressor, ChecksumType checksumType)
     {
         super(allocator);
         this.decompressor = decompressor;
+        this.checksumType = checksumType;
     }
 
     final long readHeader(ByteBuffer frame, int begin)
@@ -119,6 +129,10 @@ public final class FrameDecoderLZ4 extends FrameDecoderWith8bHeader
 
     final Frame unpackFrame(ShareableBytes bytes, int begin, int end, long header8b)
     {
+        if (checksumType != ChecksumType.CRC32)
+            // CASSANDRA-16360: not a "not yet" TODO -- see FrameEncoderLZ4#getInstance.
+            throw new UnsupportedOperationException(checksumType + " frame payload checksums are not implemented for LZ4 framing");
+
         ByteBuffer input = bytes.get();
 
         boolean isSelfContained = isSelfContained(header8b);

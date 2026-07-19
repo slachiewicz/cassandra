@@ -67,6 +67,11 @@ public final class InboundMessageHandlers
     private final InternodeInboundMetrics metrics;
     private final MessageConsumer messageConsumer;
 
+    // Most recently decoded Framing for a connection from this peer; see CASSANDRA-16360.
+    // Volatile rather than synchronized: exposed only as a best-effort metrics gauge, and
+    // updated infrequently (once per new connection, not per-message).
+    private volatile OutboundConnectionSettings.Framing currentFraming;
+
     private final HandlerProvider handlerProvider;
     private final Collection<InboundMessageHandler> handlers = new CopyOnWriteArrayList<>();
 
@@ -134,8 +139,9 @@ public final class InboundMessageHandlers
         metrics = new InternodeInboundMetrics(peer, this);
     }
 
-    InboundMessageHandler createHandler(FrameDecoder frameDecoder, ConnectionType type, Channel channel, int version)
+    InboundMessageHandler createHandler(FrameDecoder frameDecoder, OutboundConnectionSettings.Framing framing, ConnectionType type, Channel channel, int version)
     {
+        currentFraming = framing;
         InboundMessageHandler handler =
             handlerProvider.provide(frameDecoder,
 
@@ -162,6 +168,13 @@ public final class InboundMessageHandlers
     void releaseMetrics()
     {
         metrics.release();
+    }
+
+    /** Framing decoded from the most recently established connection from this peer, or null if none yet. */
+    public String currentFramingName()
+    {
+        OutboundConnectionSettings.Framing framing = currentFraming;
+        return framing == null ? null : framing.name();
     }
 
     private void onHandlerClosed(AbstractMessageHandler handler)

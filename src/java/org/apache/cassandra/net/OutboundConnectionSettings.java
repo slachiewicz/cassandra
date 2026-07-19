@@ -18,6 +18,8 @@
 
 package org.apache.cassandra.net;
 
+import java.io.IOException;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
@@ -30,6 +32,7 @@ import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Locator;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.StorageCompatibilityMode;
 
 import io.netty.channel.WriteBufferWaterMark;
 
@@ -54,17 +57,43 @@ public class OutboundConnectionSettings
         // uses our framing format with header crc24
         LZ4(1),
         // uses simple frames with separate header and payload crc
-        CRC(2);
+        CRC(2),
+        // like CRC, but the payload checksum is CRC32C rather than CRC32; see CASSANDRA-16360
+        CRC32C(3);
 
-        public static Framing forId(int id)
+        /**
+         * Thrown by {@link #forId(int)} when a peer advertises a framing id this node doesn't
+         * recognize -- e.g. an older node connecting to (or accepting from) a node with
+         * {@code internode_checksum_type: crc32c} while itself predating CRC32C framing support, or a
+         * {@code storage_compatibility_mode}/{@code internode_checksum_type} mismatch across the
+         * cluster. Extends {@link IOException} so it flows through the same handshake-decode error
+         * handling as {@link org.apache.cassandra.utils.Crc.InvalidCrc} (clean channel close + a
+         * specific log message), rather than an unhandled {@link IllegalStateException}.
+         */
+        public static class UnknownFramingException extends IOException
+        {
+            public final int id;
+
+            UnknownFramingException(int id)
+            {
+                super("Unrecognized internode framing id " + id + " -- this usually means the peer is " +
+                      "using a checksum type or framing feature this node's version doesn't support; " +
+                      "check internode_checksum_type and storage_compatibility_mode are consistent " +
+                      "across the cluster");
+                this.id = id;
+            }
+        }
+
+        public static Framing forId(int id) throws UnknownFramingException
         {
             switch (id)
             {
                 case 0: return UNPROTECTED;
                 case 1: return LZ4;
                 case 2: return CRC;
+                case 3: return CRC32C;
             }
-            throw new IllegalStateException();
+            throw new UnknownFramingException(id);
         }
 
         final int id;
@@ -459,8 +488,29 @@ public class OutboundConnectionSettings
         if (category.isStreaming())
             return Framing.UNPROTECTED;
 
-        return shouldCompressConnection(getBroadcastAddressAndPort(), to)
-               ? Framing.LZ4 : Framing.CRC;
+        if (shouldCompressConnection(getBroadcastAddressAndPort(), to))
+            // CASSANDRA-16360: CRC32C is not offered for compressed connections -- Framing.id is a
+            // 2-bit wire field and 0-3 are all now spoken for (UNPROTECTED/LZ4/CRC/CRC32C); a 5th
+            // "LZ4+CRC32C" id would need to widen that encoding, which is riskier than it looks (an
+            // old peer reading an out-of-range id would silently misinterpret it, rather than
+            // cleanly reject it the way an old peer's Framing.forId(3) does today).
+            return Framing.LZ4;
+
+        return shouldUseCrc32c() ? Framing.CRC32C : Framing.CRC;
+    }
+
+    /**
+     * CASSANDRA-16360: CRC32C internode framing is only selected when the operator has opted in
+     * (internode_checksum_type: crc32c) AND confirmed every peer in the cluster already understands
+     * it (storage_compatibility_mode: NONE). On any other compatibility mode -- including UPGRADING,
+     * which exists specifically to disable features incompatible with not-yet-upgraded peers -- this
+     * always resolves to CRC32, since there is no live per-connection capability check available at
+     * the point framing is chosen (see doc/modules/cassandra/pages/architecture/crc32c-plan.md §4.1a).
+     */
+    private static boolean shouldUseCrc32c()
+    {
+        return DatabaseDescriptor.internodeChecksumType() == Config.InternodeChecksumType.crc32c
+               && StorageCompatibilityMode.current() == StorageCompatibilityMode.NONE;
     }
 
     // note that connectTo is updated even if specified, in the case of pre40 messaging and using encryption (to update port)

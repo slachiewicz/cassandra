@@ -118,6 +118,66 @@ public class FramingTest
         testSomeFrames(FrameEncoderCrc.instance, FrameDecoderCrc.create(GlobalBufferPoolAllocator.instance));
     }
 
+    // CASSANDRA-16360
+    @Test
+    public void testRandomCrc32c()
+    {
+        testSomeFrames(FrameEncoderCrc.getInstance(org.apache.cassandra.utils.ChecksumType.CRC32C),
+                       FrameDecoderCrc.create(GlobalBufferPoolAllocator.instance, org.apache.cassandra.utils.ChecksumType.CRC32C));
+    }
+
+    // CASSANDRA-16360: a CRC32C-framed payload corrupted after encoding must be caught as a
+    // recoverable checksum failure, the same as the existing CRC32 path -- not silently accepted.
+    @Test
+    public void testCorruptCrc32cFrameIsDetected()
+    {
+        FrameEncoder encoder = FrameEncoderCrc.getInstance(org.apache.cassandra.utils.ChecksumType.CRC32C);
+        FrameDecoder decoder = FrameDecoderCrc.create(GlobalBufferPoolAllocator.instance, org.apache.cassandra.utils.ChecksumType.CRC32C);
+
+        byte[] bytes = randomishBytes(new Random(1), 64, 128);
+        FrameEncoder.Payload payload = encoder.allocator().allocate(true, bytes.length);
+        payload.buffer.put(bytes);
+        payload.finish();
+
+        ByteBuf encoded = encoder.encode(true, payload.buffer);
+        // flip one bit in the middle of the payload, well clear of the header and trailer
+        int corruptIndex = FrameEncoderCrc.HEADER_LENGTH + bytes.length / 2;
+        encoded.setByte(corruptIndex, encoded.getByte(corruptIndex) ^ 0x01);
+
+        ByteBuffer frame = BufferPools.forNetworking().getAtLeast(encoded.readableBytes(), BufferType.OFF_HEAP);
+        frame.put(encoded.internalNioBuffer(encoded.readerIndex(), encoded.readableBytes()));
+        encoded.release();
+        frame.flip();
+
+        List<FrameDecoder.Frame> out = new ArrayList<>();
+        ShareableBytes shareable = wrap(frame);
+        decoder.decode(out, shareable);
+
+        Assert.assertEquals(1, out.size());
+        Assert.assertTrue("expected a CorruptFrame for a bit-flipped CRC32C payload", out.get(0) instanceof FrameDecoder.CorruptFrame);
+        out.get(0).release();
+    }
+
+    // CASSANDRA-16360: an unrecognized framing id must raise a specific, clean exception rather than
+    // a bare IllegalStateException, so it flows through the normal handshake-decode error handling
+    // (see OutboundConnectionSettings.Framing.UnknownFramingException).
+    @Test
+    public void testUnknownFramingIdRejectedCleanly()
+    {
+        for (int id : new int[]{ 4, 5, 255 })
+        {
+            try
+            {
+                OutboundConnectionSettings.Framing.forId(id);
+                Assert.fail("expected UnknownFramingException for framing id " + id);
+            }
+            catch (OutboundConnectionSettings.Framing.UnknownFramingException e)
+            {
+                Assert.assertEquals(id, e.id);
+            }
+        }
+    }
+
     private void testSomeFrames(FrameEncoder encoder, FrameDecoder decoder)
     {
         long seed = new SecureRandom().nextLong();

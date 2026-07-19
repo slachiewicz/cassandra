@@ -49,6 +49,7 @@ import org.apache.cassandra.io.util.SequentialWriterOption;
 import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.memory.MemoryUtil;
 
@@ -146,7 +147,7 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
     @Override
     protected ChecksumWriter createChecksumWriter()
     {
-        return new DirectChecksumWriter(this::writeCrcToAlignedBuffer);
+        return new DirectChecksumWriter(this::writeCrcToAlignedBuffer, checksumType);
     }
 
     // Parent reads fchannel.position(), which lags by the bytes staged in writeBuffer.
@@ -407,8 +408,9 @@ public class DirectCompressedSequentialWriter extends CompressedSequentialWriter
     {
         private final IntConsumer alignedSink;
 
-        DirectChecksumWriter(IntConsumer alignedSink)
+        DirectChecksumWriter(IntConsumer alignedSink, ChecksumType checksumType)
         {
+            super(checksumType);
             this.alignedSink = alignedSink;
         }
 

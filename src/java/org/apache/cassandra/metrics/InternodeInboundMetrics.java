@@ -43,6 +43,7 @@ public class InternodeInboundMetrics
     private final MetricName receivedCount;
     private final MetricName throttledCount;
     private final MetricName throttledNanos;
+    private final MetricName framing;
 
     /**
      * Create metrics for given inbound message handlers.
@@ -68,6 +69,8 @@ public class InternodeInboundMetrics
         register(receivedCount = factory.createMetricName("ReceivedCount"), handlers::receivedCount);
         register(throttledCount = factory.createMetricName("ThrottledCount"), handlers::throttledCount);
         register(throttledNanos = factory.createMetricName("ThrottledNanos"), handlers::throttledNanos);
+        // Framing (checksum type) actually decoded from this peer's most recent connection; see CASSANDRA-16360.
+        register(framing = factory.createMetricName("Framing"), (Gauge<String>) handlers::currentFramingName);
     }
 
     public void release()
@@ -86,6 +89,7 @@ public class InternodeInboundMetrics
         remove(receivedCount);
         remove(throttledCount);
         remove(throttledNanos);
+        remove(framing);
     }
 
     private static void register(MetricName name, Gauge gauge)

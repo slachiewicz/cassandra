@@ -20,7 +20,7 @@ package org.apache.cassandra.db.commitlog;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Iterator;
-import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 import javax.crypto.Cipher;
 
@@ -42,6 +42,7 @@ import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.security.EncryptionContext;
 import org.apache.cassandra.security.EncryptionUtils;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.ChecksumType;
 
 import static org.apache.cassandra.config.CassandraRelevantProperties.COMMITLOG_ALLOW_IGNORE_SYNC_CRC;
 import static org.apache.cassandra.db.commitlog.CommitLogSegment.SYNC_MARKER_SIZE;
@@ -173,7 +174,7 @@ public class CommitLogSegmentReader implements Iterable<CommitLogSegmentReader.S
             return -1;
         }
         reader.seek(offset);
-        CRC32 crc = new CRC32();
+        Checksum crc = ChecksumType.CRC32.newInstance();
         updateChecksumInt(crc, (int) (descriptor.id & 0xFFFFFFFFL));
         updateChecksumInt(crc, (int) (descriptor.id >>> 32));
         updateChecksumInt(crc, (int) reader.getPosition());

@@ -26,7 +26,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
-import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 import javax.crypto.Cipher;
 
@@ -52,6 +52,7 @@ import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.security.EncryptionContext;
 import org.apache.cassandra.serializers.MarshalException;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.Hex;
 import org.apache.cassandra.utils.JsonUtils;
 
@@ -384,7 +385,10 @@ final class HintsDescriptor
 
     void serialize(DataOutputPlus out) throws IOException
     {
-        CRC32 crc = new CRC32();
+        // This checksum protects the descriptor's own `version` field, so -- like
+        // CommitLogDescriptor's header checksum -- it can never be selected BY that version and is
+        // permanently CRC32, not a Phase 1 placeholder.
+        Checksum crc = ChecksumType.CRC32.newInstance();
 
         out.writeInt(version);
         updateChecksumInt(crc, version);
@@ -437,7 +441,7 @@ final class HintsDescriptor
 
     static HintsDescriptor deserialize(DataInput in) throws IOException
     {
-        CRC32 crc = new CRC32();
+        Checksum crc = ChecksumType.CRC32.newInstance();
 
         int version = in.readInt();
         updateChecksumInt(crc, version);
@@ -481,7 +485,7 @@ final class HintsDescriptor
         }
     }
 
-    private static void updateChecksumLong(CRC32 crc, long value)
+    private static void updateChecksumLong(Checksum crc, long value)
     {
         updateChecksumInt(crc, (int) (value & 0xFFFFFFFFL));
         updateChecksumInt(crc, (int) (value >>> 32));

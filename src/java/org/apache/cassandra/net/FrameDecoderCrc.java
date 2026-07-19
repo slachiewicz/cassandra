@@ -21,6 +21,9 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Collection;
 import java.util.zip.CRC32;
+import java.util.zip.Checksum;
+
+import org.apache.cassandra.utils.ChecksumType;
 
 import io.netty.channel.ChannelPipeline;
 
@@ -57,14 +60,30 @@ import static org.apache.cassandra.utils.Crc.updateCrc32;
  */
 public final class FrameDecoderCrc extends FrameDecoderWith8bHeader
 {
+    // CASSANDRA-16360: payload checksum algorithm, selected per-connection by
+    // OutboundConnectionSettings#framing (gated on internode_checksum_type + StorageCompatibilityMode,
+    // see crc32c-plan.md §4.1b). The frame header CRC24 is unaffected by this and is not migrated.
+    private final ChecksumType checksumType;
+
     public FrameDecoderCrc(BufferPoolAllocator allocator)
     {
+        this(allocator, ChecksumType.CRC32);
+    }
+
+    public FrameDecoderCrc(BufferPoolAllocator allocator, ChecksumType checksumType)
+    {
         super(allocator);
+        this.checksumType = checksumType;
     }
 
     public static FrameDecoderCrc create(BufferPoolAllocator allocator)
     {
         return new FrameDecoderCrc(allocator);
+    }
+
+    public static FrameDecoderCrc create(BufferPoolAllocator allocator, ChecksumType checksumType)
+    {
+        return new FrameDecoderCrc(allocator, checksumType);
     }
 
     static final int HEADER_LENGTH = 6;
@@ -133,18 +152,42 @@ public final class FrameDecoderCrc extends FrameDecoderWith8bHeader
         ByteBuffer in = bytes.get();
         boolean isSelfContained = isSelfContained(header6b);
 
-        CRC32 crc = crc32();
         int readFullCrc = in.getInt(end - TRAILER_LENGTH);
         if (in.order() == ByteOrder.BIG_ENDIAN)
             readFullCrc = Integer.reverseBytes(readFullCrc);
 
-        updateCrc32(crc, in, begin + HEADER_LENGTH, end - TRAILER_LENGTH);
-        int computeFullCrc = (int) crc.getValue();
+        int computeFullCrc = (int) computePayloadChecksum(in, begin + HEADER_LENGTH, end - TRAILER_LENGTH);
 
         if (readFullCrc != computeFullCrc)
             return CorruptFrame.recoverable(isSelfContained, (end - begin) - HEADER_AND_TRAILER_LENGTH, readFullCrc, computeFullCrc);
 
         return new IntactFrame(isSelfContained, bytes.slice(begin + HEADER_LENGTH, end - TRAILER_LENGTH));
+    }
+
+    /**
+     * CASSANDRA-16360: mirrors {@link FrameEncoderCrc#computePayloadChecksum} -- CRC32 preserves
+     * {@link org.apache.cassandra.utils.Crc}'s exact historical priming behavior for wire
+     * compatibility with every prior release; CRC32C is a plain, unprimed checksum over the same
+     * byte range.
+     */
+    private long computePayloadChecksum(ByteBuffer in, int start, int end)
+    {
+        if (checksumType == ChecksumType.CRC32)
+        {
+            CRC32 crc = crc32();
+            updateCrc32(crc, in, start, end);
+            return crc.getValue();
+        }
+
+        Checksum crc = checksumType.newInstance();
+        int savePosition = in.position();
+        int saveLimit = in.limit();
+        in.limit(end);
+        in.position(start);
+        crc.update(in);
+        in.limit(saveLimit);
+        in.position(savePosition);
+        return crc.getValue();
     }
 
     void decode(Collection<Frame> into, ShareableBytes bytes)

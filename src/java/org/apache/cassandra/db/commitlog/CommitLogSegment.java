@@ -32,7 +32,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
-import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 import com.codahale.metrics.Timer;
 import com.google.common.annotations.VisibleForTesting;
@@ -52,6 +52,7 @@ import org.apache.cassandra.io.util.SimpleCachedBufferPool;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.IntegerInterval;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.concurrent.WaitQueue;
@@ -408,7 +409,7 @@ public abstract class CommitLogSegment
     {
         if (filePos > nextMarker)
             throw new IllegalArgumentException(String.format("commit log sync marker's current file position %d is greater than next file position %d", filePos, nextMarker));
-        CRC32 crc = new CRC32();
+        Checksum crc = ChecksumType.CRC32.newInstance();
         updateChecksumInt(crc, (int) (id & 0xFFFFFFFFL));
         updateChecksumInt(crc, (int) (id >>> 32));
         updateChecksumInt(crc, filePos);
