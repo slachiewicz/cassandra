@@ -32,7 +32,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiPredicate;
 import java.util.function.Function;
-import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -60,6 +60,7 @@ import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.security.EncryptionContext;
 import org.apache.cassandra.service.DiskErrorsHandlerService;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.MBeanWrapper;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
@@ -311,7 +312,7 @@ public class CommitLog implements CommitLogMBean
             int totalSize = size + ENTRY_OVERHEAD_SIZE;
             Allocation alloc = segmentManager.allocate(mutation, totalSize);
 
-            CRC32 checksum = new CRC32();
+            Checksum checksum = ChecksumType.CRC32.newInstance();
             final ByteBuffer buffer = alloc.getBuffer();
             try (BufferedDataOutputStreamPlus dos = new DataOutputBufferFixed(buffer))
             {

@@ -21,6 +21,7 @@ import com.codahale.metrics.Gauge;
 import com.codahale.metrics.Meter;
 
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.net.ConnectionCategory;
 import org.apache.cassandra.net.OutboundConnections;
 
 import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
@@ -106,7 +107,9 @@ public class InternodeOutboundMetrics
     public final Gauge<Long> urgentMessageDroppedTasksDueToError;
     /** Dropped bytes because of error for urgent message TCP Connections */
     public final Gauge<Long> urgentMessageDroppedBytesDueToError;
-    
+    /** Framing (checksum type) currently selected for messaging connections to this peer; see CASSANDRA-16360 */
+    public final Gauge<String> framing;
+
     private final MetricNameFactory factory;
 
     /**
@@ -155,6 +158,8 @@ public class InternodeOutboundMetrics
         urgentMessageDroppedTasksDueToError = Metrics.register(factory.createMetricName("UrgentMessageDroppedTasksDueToError"), messagingPool.urgent::errorCount);
         urgentMessageDroppedBytesDueToError = Metrics.register(factory.createMetricName("UrgentMessageDroppedBytesDueToError"), messagingPool.urgent::errorBytes);
         expiredCallbacks = Metrics.meter(factory.createMetricName("Timeouts"));
+        framing = Metrics.register(factory.createMetricName("Framing"),
+                                    () -> messagingPool.template().framing(ConnectionCategory.MESSAGING).name());
 
         // deprecated
         Metrics.register(factory.createMetricName("GossipMessagePendingTasks"), (Gauge<Integer>) messagingPool.urgent::pendingCount);
@@ -201,5 +206,6 @@ public class InternodeOutboundMetrics
         Metrics.remove(factory.createMetricName("UrgentMessageDroppedTasksDueToError"));
         Metrics.remove(factory.createMetricName("UrgentMessageDroppedBytesDueToError"));
         Metrics.remove(factory.createMetricName("Timeouts"));
+        Metrics.remove(factory.createMetricName("Framing"));
     }
 }

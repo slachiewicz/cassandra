@@ -24,7 +24,7 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
-import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -33,6 +33,7 @@ import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputBufferFixed;
 import org.apache.cassandra.io.util.File;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.NativeLibrary;
 import org.apache.cassandra.utils.SyncUtil;
 import org.apache.cassandra.utils.Throwables;
@@ -51,11 +52,11 @@ class HintsWriter implements AutoCloseable
     private final File file;
     protected final FileChannel channel;
     private final int fd;
-    protected final CRC32 globalCRC;
+    protected final Checksum globalCRC;
 
     private volatile long lastSyncPosition = 0L;
 
-    protected HintsWriter(File directory, HintsDescriptor descriptor, File file, FileChannel channel, int fd, CRC32 globalCRC)
+    protected HintsWriter(File directory, HintsDescriptor descriptor, File file, FileChannel channel, int fd, Checksum globalCRC)
     {
         this.directory = directory;
         this.descriptor = descriptor;
@@ -72,7 +73,7 @@ class HintsWriter implements AutoCloseable
         FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
         int fd = NativeLibrary.getfd(channel);
 
-        CRC32 crc = new CRC32();
+        Checksum crc = ChecksumType.CRC32.newInstance();
 
         try (DataOutputBuffer dob = DataOutputBuffer.scratchBuffer.get())
         {
@@ -241,7 +242,7 @@ class HintsWriter implements AutoCloseable
                                   ? buffer
                                   : ByteBuffer.allocate(totalSize);
 
-            CRC32 crc = new CRC32();
+            Checksum crc = ChecksumType.CRC32.newInstance();
             try (DataOutputBufferFixed out = new DataOutputBufferFixed(hintBuffer))
             {
                 out.writeInt(hintSize);

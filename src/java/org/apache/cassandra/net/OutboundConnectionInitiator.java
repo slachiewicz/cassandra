@@ -36,6 +36,7 @@ import org.apache.cassandra.net.OutboundConnectionInitiator.Result.MessagingSucc
 import org.apache.cassandra.net.OutboundConnectionInitiator.Result.StreamingSuccess;
 import org.apache.cassandra.security.ISslContextFactory;
 import org.apache.cassandra.security.SSLFactory;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 import org.apache.cassandra.utils.concurrent.AsyncPromise;
 import org.apache.cassandra.utils.concurrent.ImmediateFuture;
@@ -372,10 +373,13 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
                         switch (settings.framing)
                         {
                             case LZ4:
-                                frameEncoder = FrameEncoderLZ4.fastInstance;
+                                frameEncoder = FrameEncoderLZ4.getInstance(ChecksumType.CRC32);
                                 break;
                             case CRC:
-                                frameEncoder = FrameEncoderCrc.instance;
+                                frameEncoder = FrameEncoderCrc.getInstance(ChecksumType.CRC32);
+                                break;
+                            case CRC32C:
+                                frameEncoder = FrameEncoderCrc.getInstance(ChecksumType.CRC32C);
                                 break;
                             case UNPROTECTED:
                                 frameEncoder = FrameEncoderUnprotected.instance;

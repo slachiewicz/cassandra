@@ -28,12 +28,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.io.util.DataOutputBufferFixed;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.AbstractIterator;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.memory.MemoryUtil;
 
@@ -249,7 +250,7 @@ final class HintsBuffer
         private void write(Hint hint)
         {
             ByteBuffer buffer = slab.duplicate().position(offset).limit(offset + totalSize);
-            CRC32 crc = new CRC32();
+            Checksum crc = ChecksumType.CRC32.newInstance();
             int hintSize = totalSize - ENTRY_OVERHEAD_SIZE;
             try (DataOutputBuffer dop = new DataOutputBufferFixed(buffer))
             {

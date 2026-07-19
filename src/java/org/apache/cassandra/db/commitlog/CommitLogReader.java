@@ -28,7 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -50,6 +50,7 @@ import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.io.util.RebufferingInputStream;
 import org.apache.cassandra.schema.TableId;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 
 import static org.apache.cassandra.utils.FBUtilities.updateChecksumInt;
@@ -62,14 +63,18 @@ public class CommitLogReader
 
     @VisibleForTesting
     public static final int ALL_MUTATIONS = -1;
-    private final CRC32 checksum;
+    // CASSANDRA-16360 Phase 1 plumbing: generalized from a concrete CRC32 field to the Checksum
+    // interface so a later phase can select ChecksumType by desc.version; CommitLogFormat below
+    // already threads commitLogVersion through for exactly this purpose, unused until such a
+    // version exists. Always CRC32 today, so behavior is unchanged.
+    private final Checksum checksum;
     private final Map<TableId, AtomicInteger> invalidMutations;
 
     private byte[] buffer;
 
     public CommitLogReader()
     {
-        checksum = new CRC32();
+        checksum = ChecksumType.CRC32.newInstance();
         invalidMutations = new HashMap<>();
         buffer = new byte[4096];
     }
@@ -498,7 +503,7 @@ public class CommitLogReader
             return input.readInt() & 0xffffffffL;
         }
 
-        public static void updateChecksum(CRC32 checksum, int serializedSize, int commitLogVersion)
+        public static void updateChecksum(Checksum checksum, int serializedSize, int commitLogVersion)
         {
             updateChecksumInt(checksum, serializedSize);
         }

@@ -24,7 +24,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.file.OpenOption;
 import java.util.Optional;
-import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 import javax.annotation.Nullable;
 
@@ -41,12 +41,18 @@ import org.apache.cassandra.io.util.SequentialWriter;
 import org.apache.cassandra.io.util.SequentialWriterOption;
 import org.apache.cassandra.schema.CompressionParams;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.memory.MemoryUtil;
 
 import static org.apache.cassandra.utils.Throwables.merge;
 
 public class CompressedSequentialWriter extends SequentialWriter
 {
+    // CASSANDRA-16360 Phase 1 plumbing: single source of truth for the algorithm this writer's
+    // chunk/full-file checksums use, so createChecksumWriter() and the resetAndTruncate() readback
+    // verification below never drift apart. Always CRC32 until a later phase wires this to a
+    // negotiated/versioned value.
+    protected final ChecksumType checksumType = ChecksumType.CRC32;
     protected final ChecksumWriter crcMetadata;
 
     // holds offset in the file where current chunk should be written
@@ -162,7 +168,7 @@ public class CompressedSequentialWriter extends SequentialWriter
      */
     protected ChecksumWriter createChecksumWriter()
     {
-        return new ChecksumWriter(new DataOutputStream(Channels.newOutputStream(channel)));
+        return new ChecksumWriter(new DataOutputStream(Channels.newOutputStream(channel)), checksumType);
     }
 
     @Override
@@ -337,7 +343,7 @@ public class CompressedSequentialWriter extends SequentialWriter
                 throw new CorruptBlockException(getPath(), chunkOffset, chunkSize, e);
             }
 
-            CRC32 checksum = new CRC32();
+            Checksum checksum = checksumType.newInstance();
             compressed.rewind();
             checksum.update(compressed);
 

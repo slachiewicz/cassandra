@@ -1226,8 +1226,22 @@ public class FBUtilities
       * Updates checksum with the provided ByteBuffer at the given offset + length.
       * Resets position and limit back to their original values on return.
       * This method is *NOT* thread-safe.
+      *
+      * @deprecated retained only for binary compatibility with existing callers compiled against the
+      * concrete CRC32 signature; new code should call {@link #updateChecksum(Checksum, ByteBuffer, int, int)}.
       */
+    @Deprecated(since = "5.1")
     public static void updateChecksum(CRC32 checksum, ByteBuffer buffer, int offset, int length)
+    {
+        updateChecksum((Checksum) checksum, buffer, offset, length);
+    }
+
+    /**
+      * Updates checksum with the provided ByteBuffer at the given offset + length.
+      * Resets position and limit back to their original values on return.
+      * This method is *NOT* thread-safe.
+      */
+    public static void updateChecksum(Checksum checksum, ByteBuffer buffer, int offset, int length)
     {
         int position = buffer.position();
         int limit = buffer.limit();
@@ -1242,8 +1256,22 @@ public class FBUtilities
      * Updates checksum with the provided ByteBuffer.
      * Resets position back to its original values on return.
      * This method is *NOT* thread-safe.
+     *
+     * @deprecated retained only for binary compatibility with existing callers compiled against the
+     * concrete CRC32 signature; new code should call {@link #updateChecksum(Checksum, ByteBuffer)}.
      */
+    @Deprecated(since = "5.1")
     public static void updateChecksum(CRC32 checksum, ByteBuffer buffer)
+    {
+        updateChecksum((Checksum) checksum, buffer);
+    }
+
+    /**
+     * Updates checksum with the provided ByteBuffer.
+     * Resets position back to its original values on return.
+     * This method is *NOT* thread-safe.
+     */
+    public static void updateChecksum(Checksum checksum, ByteBuffer buffer)
     {
         int position = buffer.position();
         checksum.update(buffer);

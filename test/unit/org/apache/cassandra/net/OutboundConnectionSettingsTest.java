@@ -31,6 +31,7 @@ import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.StubClusterMetadataService;
+import org.apache.cassandra.utils.StorageCompatibilityMode;
 
 import static org.apache.cassandra.net.OutboundConnectionsTest.LOCAL_ADDR;
 import static org.apache.cassandra.net.OutboundConnectionsTest.REMOTE_ADDR;
@@ -131,6 +132,40 @@ public class OutboundConnectionSettingsTest
         ClusterMetadataTestHelper.register(REMOTE_ADDR, DC1, RACK);
         DatabaseDescriptor.setInternodeCompression(Config.InternodeCompression.dc);
         Assert.assertFalse(OutboundConnectionSettings.shouldCompressConnection(LOCAL_ADDR, REMOTE_ADDR));
+    }
+
+    // CASSANDRA-16360: Framing.CRC32C is only selected for the single (crc32c, NONE) combination;
+    // every other combination of internode_checksum_type x storage_compatibility_mode must fall back
+    // to plain CRC, since there is no live per-connection capability check available at the point
+    // framing() is called (see crc32c-plan.md §4.1a/§4.1b).
+    @Test
+    public void framing_Crc32cOnlyWhenOptedInAndCompatibilityModeNone()
+    {
+        DatabaseDescriptor.setInternodeCompression(Config.InternodeCompression.none);
+        StorageCompatibilityMode originalMode = DatabaseDescriptor.getStorageCompatibilityMode();
+        Config.InternodeChecksumType originalChecksumType = DatabaseDescriptor.internodeChecksumType();
+        try
+        {
+            assertFraming(Config.InternodeChecksumType.crc32, StorageCompatibilityMode.NONE, OutboundConnectionSettings.Framing.CRC);
+            assertFraming(Config.InternodeChecksumType.crc32, StorageCompatibilityMode.UPGRADING, OutboundConnectionSettings.Framing.CRC);
+            assertFraming(Config.InternodeChecksumType.crc32c, StorageCompatibilityMode.NONE, OutboundConnectionSettings.Framing.CRC32C);
+            assertFraming(Config.InternodeChecksumType.crc32c, StorageCompatibilityMode.UPGRADING, OutboundConnectionSettings.Framing.CRC);
+            assertFraming(Config.InternodeChecksumType.crc32c, StorageCompatibilityMode.CASSANDRA_5, OutboundConnectionSettings.Framing.CRC);
+        }
+        finally
+        {
+            DatabaseDescriptor.setStorageCompatibilityMode(originalMode);
+            DatabaseDescriptor.setInternodeChecksumType(originalChecksumType);
+        }
+    }
+
+    private static void assertFraming(Config.InternodeChecksumType checksumType, StorageCompatibilityMode mode, OutboundConnectionSettings.Framing expected)
+    {
+        DatabaseDescriptor.setInternodeChecksumType(checksumType);
+        DatabaseDescriptor.setStorageCompatibilityMode(mode);
+        OutboundConnectionSettings settings = new OutboundConnectionSettings(REMOTE_ADDR);
+        Assert.assertEquals("checksumType=" + checksumType + " mode=" + mode,
+                             expected, settings.framing(ConnectionCategory.MESSAGING));
     }
 
 }

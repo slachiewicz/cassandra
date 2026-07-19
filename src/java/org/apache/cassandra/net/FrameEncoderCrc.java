@@ -20,6 +20,9 @@ package org.apache.cassandra.net;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.zip.CRC32;
+import java.util.zip.Checksum;
+
+import org.apache.cassandra.utils.ChecksumType;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandler;
@@ -37,13 +40,39 @@ public class FrameEncoderCrc extends FrameEncoder
     private static final int TRAILER_LENGTH = 4;
     public static final int HEADER_AND_TRAILER_LENGTH = 10;
 
-    public static final FrameEncoderCrc instance = new FrameEncoderCrc();
+    public static final FrameEncoderCrc instance = new FrameEncoderCrc(ChecksumType.CRC32);
+    // CASSANDRA-16360: a distinct singleton, not a field on `instance`, since FrameEncoderCrc is
+    // @Sharable and stateless-per-connection -- see getInstance(ChecksumType) below.
+    private static final FrameEncoderCrc crc32cInstance = new FrameEncoderCrc(ChecksumType.CRC32C);
+
     static final PayloadAllocator allocator = (isSelfContained, capacity) ->
         new Payload(isSelfContained, capacity, HEADER_LENGTH, TRAILER_LENGTH);
+
+    private final ChecksumType checksumType;
+
+    private FrameEncoderCrc(ChecksumType checksumType)
+    {
+        this.checksumType = checksumType;
+    }
 
     public PayloadAllocator allocator()
     {
         return allocator;
+    }
+
+    /**
+     * CASSANDRA-16360: entry point for callers to select a checksum-type-specific encoder singleton,
+     * without touching the existing {@link #instance} field that native protocol and internode callers
+     * already reference directly for the CRC32 case.
+     */
+    public static FrameEncoderCrc getInstance(ChecksumType checksumType)
+    {
+        switch (checksumType)
+        {
+            case CRC32:  return instance;
+            case CRC32C: return crc32cInstance;
+            default:     throw new UnsupportedOperationException(checksumType + " frame payload checksums are not implemented");
+        }
     }
 
     static void writeHeader(ByteBuffer frame, boolean isSelfContained, int dataLength)
@@ -74,12 +103,10 @@ public class FrameEncoderCrc extends FrameEncoder
 
             writeHeader(frame, isSelfContained, dataLength);
 
-            CRC32 crc = crc32();
             frame.position(HEADER_LENGTH);
             frame.limit(dataLength + HEADER_LENGTH);
-            crc.update(frame);
+            int frameCrc = (int) computePayloadChecksum(frame);
 
-            int frameCrc = (int) crc.getValue();
             if (frame.order() == ByteOrder.BIG_ENDIAN)
                 frameCrc = Integer.reverseBytes(frameCrc);
 
@@ -94,5 +121,27 @@ public class FrameEncoderCrc extends FrameEncoder
             bufferPool.put(frame);
             throw t;
         }
+    }
+
+    /**
+     * CASSANDRA-16360: the CRC32 path preserves {@link org.apache.cassandra.utils.Crc}'s exact
+     * historical behavior, including its magic-prefix priming -- this is load-bearing for
+     * byte-identical wire compatibility with every prior release. CRC32C intentionally does *not*
+     * reuse that priming: it was CRC32-specific tuning with no established rationale for CRC32C
+     * (see doc/modules/cassandra/pages/architecture/crc32c-plan.md §4.1b), so CRC32C frames are a
+     * plain, unprimed checksum over the same payload bytes.
+     */
+    private long computePayloadChecksum(ByteBuffer payload)
+    {
+        if (checksumType == ChecksumType.CRC32)
+        {
+            CRC32 crc = crc32();
+            crc.update(payload);
+            return crc.getValue();
+        }
+
+        Checksum crc = checksumType.newInstance();
+        crc.update(payload);
+        return crc.getValue();
     }
 }

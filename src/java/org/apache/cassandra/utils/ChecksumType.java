@@ -20,6 +20,7 @@ package org.apache.cassandra.utils;
 import java.nio.ByteBuffer;
 import java.util.zip.Adler32;
 import java.util.zip.CRC32;
+import java.util.zip.CRC32C;
 import java.util.zip.Checksum;
 
 import io.netty.util.concurrent.FastThreadLocal;
@@ -55,6 +56,27 @@ public enum ChecksumType
         public void update(Checksum checksum, ByteBuffer buf)
         {
             ((CRC32)checksum).update(buf);
+        }
+
+    },
+    /**
+     * CASSANDRA-16360: not yet selected by any caller. Added in Phase 1 plumbing so later phases
+     * (internode negotiation, native protocol v6/v7) have a stable enum constant to reference; see
+     * PLAN.md for the version-gated rollout.
+     */
+    CRC32C
+    {
+
+        @Override
+        public Checksum newInstance()
+        {
+            return new CRC32C();
+        }
+
+        @Override
+        public void update(Checksum checksum, ByteBuffer buf)
+        {
+            ((CRC32C)checksum).update(buf);
         }
 
     };

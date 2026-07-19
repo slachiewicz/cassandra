@@ -26,6 +26,7 @@ import net.jpountz.lz4.LZ4Factory;
 
 import org.apache.cassandra.io.compress.BufferType;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.ChecksumType;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandler;
@@ -47,6 +48,21 @@ class FrameEncoderLZ4 extends FrameEncoder
     private FrameEncoderLZ4(LZ4Compressor compressor)
     {
         this.compressor = compressor;
+    }
+
+    /**
+     * CASSANDRA-16360 Phase 1 plumbing: see FrameEncoderCrc#getInstance for rationale. Only CRC32 is
+     * implemented today.
+     */
+    public static FrameEncoderLZ4 getInstance(ChecksumType checksumType)
+    {
+        if (checksumType != ChecksumType.CRC32)
+            // CASSANDRA-16360: not a "not yet" TODO -- Framing.id is a 2-bit wire field with no room
+            // for a distinct "LZ4+CRC32C" id alongside UNPROTECTED/LZ4/CRC/CRC32C; see
+            // OutboundConnectionSettings#framing and crc32c-plan.md §4.2. Compressed connections keep
+            // CRC32 for their payload checksum indefinitely, or until a future id-space-widening effort.
+            throw new UnsupportedOperationException(checksumType + " frame payload checksums are not implemented for LZ4 framing");
+        return fastInstance;
     }
 
     private static final int HEADER_LENGTH = 8;

@@ -1976,6 +1976,25 @@ client_encryption_options:
 #   nothing is compressed.
 internode_compression: dc
 
+# internode_checksum_type controls which checksum algorithm is requested for
+# internode CRC-framed connections (CASSANDRA-16360).
+# Can be:
+#
+# crc32
+#   the traditional CRC-32 (IEEE 802.3) algorithm.
+#
+# crc32c
+#   the Castagnoli CRC-32C algorithm, JIT-intrinsified on x86_64 (SSE4.2) and
+#   some ARM64 CPUs. NOTE: crc32c is only actually used when
+#   storage_compatibility_mode is NONE (i.e. every node in the cluster has
+#   been confirmed upgraded to a version that understands it) -- on any
+#   other storage_compatibility_mode this setting is ignored and crc32 is
+#   used, to avoid sending an old peer a framing byte it can't decode.
+#   Benchmark this on your own hardware/JDK before enabling: CRC32C is not a
+#   universal win (see doc/modules/cassandra/pages/architecture/crc32c-plan.md
+#   Phase 0 -- on ARM64/Apple Silicon it showed no measurable benefit).
+internode_checksum_type: crc32
+
 # Enable or disable tcp_nodelay for inter-dc communication.
 # Disabling it will result in larger (but fewer) network packets being sent,
 # reducing overhead from the TCP protocol itself, at the cost of increasing

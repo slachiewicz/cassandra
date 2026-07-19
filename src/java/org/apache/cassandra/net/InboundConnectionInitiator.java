@@ -44,6 +44,7 @@ import org.apache.cassandra.security.SSLFactory;
 import org.apache.cassandra.streaming.StreamDeserializingTask;
 import org.apache.cassandra.streaming.StreamingChannel;
 import org.apache.cassandra.streaming.async.NettyStreamingChannel;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.memory.BufferPools;
 
@@ -390,10 +391,20 @@ public class InboundConnectionInitiator
             final SocketAddress remoteAddress = channel.remoteAddress();
             boolean reportingExclusion = DatabaseDescriptor.getInternodeErrorReportingExclusions().contains(remoteAddress);
 
+            Throwable rootCause = cause == null ? null : Throwables.getRootCause(cause);
+            Framing.UnknownFramingException unknownFraming = rootCause instanceof Framing.UnknownFramingException
+                                                               ? (Framing.UnknownFramingException) rootCause
+                                                               : null;
+
             if (reportingExclusion)
                 logger.debug("Excluding internode exception for {}; address contained in internode_error_reporting_exclusions", remoteAddress, cause);
             else if (cause != null && Throwables.getRootCause(cause) instanceof Message.InvalidLegacyProtocolMagic && DatabaseDescriptor.getInvalidLegacyProtocolMagicNoSpamEnabled())
                 noSpam5m.warn("Failed to properly handshake with peer {}. Closing the channel. Invalid legacy protocol magic.", ((InetSocketAddress) channel.remoteAddress()).getHostName());
+            else if (unknownFraming != null)
+                logger.warn("Peer {} sent an unrecognized internode framing id {} while handshaking. This " +
+                            "usually means the peer predates CRC32C framing support, or internode_checksum_type " +
+                            "/ storage_compatibility_mode are inconsistent across the cluster -- not data " +
+                            "corruption. Closing the channel.", remoteAddress, unknownFraming.id);
             else
                 logger.error("Failed to properly handshake with peer {}. Closing the channel.", remoteAddress, cause);
 
@@ -492,12 +503,17 @@ public class InboundConnectionInitiator
             {
                 case LZ4:
                 {
-                    frameDecoder = FrameDecoderLZ4.fast(allocator);
+                    frameDecoder = FrameDecoderLZ4.fast(allocator, ChecksumType.CRC32);
                     break;
                 }
                 case CRC:
                 {
-                    frameDecoder = FrameDecoderCrc.create(allocator);
+                    frameDecoder = FrameDecoderCrc.create(allocator, ChecksumType.CRC32);
+                    break;
+                }
+                case CRC32C:
+                {
+                    frameDecoder = FrameDecoderCrc.create(allocator, ChecksumType.CRC32C);
                     break;
                 }
                 case UNPROTECTED:
@@ -512,7 +528,7 @@ public class InboundConnectionInitiator
             frameDecoder.addLastTo(pipeline);
 
             InboundMessageHandler handler =
-                settings.handlers.apply(from).createHandler(frameDecoder, initiate.type, pipeline.channel(), useMessagingVersion);
+                settings.handlers.apply(from).createHandler(frameDecoder, initiate.framing, initiate.type, pipeline.channel(), useMessagingVersion);
 
             logger.info("{} messaging connection established, version = {}, framing = {}, encryption = {}",
                         handler.id(true),

@@ -23,28 +23,43 @@ import java.io.IOError;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 import javax.annotation.Nonnull;
 
 import org.apache.cassandra.io.FSWriteError;
+import org.apache.cassandra.utils.ChecksumType;
 
 public class ChecksumWriter
 {
-    private final CRC32 incrementalChecksum = new CRC32();
+    private final Checksum incrementalChecksum;
     private final DataOutput incrementalOut;
-    private final CRC32 fullChecksum = new CRC32();
+    private final Checksum fullChecksum;
 
     public ChecksumWriter(DataOutput incrementalOut)
     {
+        this(incrementalOut, ChecksumType.CRC32);
+    }
+
+    public ChecksumWriter(DataOutput incrementalOut, ChecksumType checksumType)
+    {
+        this.incrementalChecksum = checksumType.newInstance();
         this.incrementalOut = incrementalOut;
+        this.fullChecksum = checksumType.newInstance();
     }
 
     // Subclasses with their own CRC sink (see writeIncrementalInt) use this ctor; they must not call
     // writeChunkSize, which needs incrementalOut.
     protected ChecksumWriter()
     {
+        this(ChecksumType.CRC32);
+    }
+
+    protected ChecksumWriter(ChecksumType checksumType)
+    {
+        this.incrementalChecksum = checksumType.newInstance();
         this.incrementalOut = null;
+        this.fullChecksum = checksumType.newInstance();
     }
 
     // Seam so subclasses can redirect the per-chunk CRC int without re-implementing appendDirect's

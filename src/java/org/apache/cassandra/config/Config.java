@@ -528,6 +528,17 @@ public class Config
 
     public InternodeCompression internode_compression = InternodeCompression.none;
 
+    /**
+     * CASSANDRA-16360: which checksum algorithm to request for internode CRC-framed connections.
+     * {@code crc32c} is only actually selected when {@link StorageCompatibilityMode#current()} is
+     * {@link StorageCompatibilityMode#NONE} (i.e. the operator has confirmed every peer in the
+     * cluster is upgraded) -- see OutboundConnectionSettings#framing(ConnectionCategory). Defaults to
+     * {@code crc32} until that benchmark case is made for the operator's own hardware/JDK; see
+     * doc/modules/cassandra/pages/architecture/crc32c-plan.md Phase 0 for why this isn't a
+     * universal win.
+     */
+    public InternodeChecksumType internode_checksum_type = InternodeChecksumType.crc32;
+
     @Replaces(oldName = "hinted_handoff_throttle_in_kb", converter = Converters.KIBIBYTES_DATASTORAGE, deprecated = true)
     public DataStorageSpec.IntKibibytesBound hinted_handoff_throttle = new DataStorageSpec.IntKibibytesBound("1024KiB");
     @Replaces(oldName = "batchlog_replay_throttle_in_kb", converter = Converters.KIBIBYTES_DATASTORAGE, deprecated = true)
@@ -1350,6 +1361,11 @@ public class Config
     public enum InternodeCompression
     {
         all, none, dc
+    }
+
+    public enum InternodeChecksumType
+    {
+        crc32, crc32c
     }
 
     public enum DiskAccessMode

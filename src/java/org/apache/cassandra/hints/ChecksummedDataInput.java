@@ -19,7 +19,7 @@ package org.apache.cassandra.hints;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.zip.CRC32;
+import java.util.zip.Checksum;
 
 import com.google.common.base.Preconditions;
 
@@ -28,6 +28,7 @@ import org.apache.cassandra.io.util.ChannelProxy;
 import org.apache.cassandra.io.util.File;
 import org.apache.cassandra.io.util.RandomAccessReader;
 import org.apache.cassandra.io.util.RebufferingInputStream;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.NativeLibrary;
 import org.apache.cassandra.utils.Throwables;
 import org.apache.cassandra.utils.memory.MemoryUtil;
@@ -45,7 +46,7 @@ import org.apache.cassandra.utils.memory.MemoryUtil;
  */
 public class ChecksummedDataInput extends RebufferingInputStream
 {
-    private final CRC32 crc;
+    private final Checksum crc;
     private int crcPosition;
     private boolean crcUpdateDisabled;
 
@@ -59,7 +60,7 @@ public class ChecksummedDataInput extends RebufferingInputStream
     {
         super(bufferType.allocate(RandomAccessReader.DEFAULT_BUFFER_SIZE));
 
-        crc = new CRC32();
+        crc = ChecksumType.CRC32.newInstance();
         crcPosition = 0;
         crcUpdateDisabled = false;
         this.channel = channel;
