@@ -20,12 +20,12 @@ package org.apache.cassandra.net;
 
 import java.util.concurrent.TimeUnit;
 
+import com.codahale.metrics.Gauge;
+
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
-
-import com.codahale.metrics.Gauge;
 
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.locator.InetAddressAndPort;

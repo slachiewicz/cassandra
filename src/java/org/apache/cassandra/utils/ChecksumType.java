@@ -60,13 +60,13 @@ public enum ChecksumType
 
     },
     /**
-     * CASSANDRA-16360: not yet selected by any caller. Added in Phase 1 plumbing so later phases
-     * (internode negotiation, native protocol v6/v7) have a stable enum constant to reference; see
-     * PLAN.md for the version-gated rollout.
+     * CASSANDRA-16360: selected today only by internode CRC framing ({@code Framing.CRC32C}), gated on
+     * {@code internode_checksum_type: crc32c} plus {@code storage_compatibility_mode: NONE}. On-disk
+     * formats and the native protocol still use CRC32 exclusively; see
+     * doc/modules/cassandra/pages/architecture/crc32c-plan.md for the phased rollout.
      */
     CRC32C
     {
-
         @Override
         public Checksum newInstance()
         {

@@ -1992,7 +1992,8 @@ internode_compression: dc
 #   used, to avoid sending an old peer a framing byte it can't decode.
 #   Benchmark this on your own hardware/JDK before enabling: CRC32C is not a
 #   universal win (see doc/modules/cassandra/pages/architecture/crc32c-plan.md
-#   Phase 0 -- on ARM64/Apple Silicon it showed no measurable benefit).
+#   Phase 0 -- 6-8x faster on SSE4.2-era x86_64, but no measurable benefit on
+#   CPUs with a vectorized CRC32 path, e.g. AMD Zen 3 or Apple Silicon).
 internode_checksum_type: crc32
 
 # Enable or disable tcp_nodelay for inter-dc communication.
