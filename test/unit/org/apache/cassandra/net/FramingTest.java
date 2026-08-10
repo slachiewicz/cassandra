@@ -158,6 +158,47 @@ public class FramingTest
         out.get(0).release();
     }
 
+    // CASSANDRA-16360: known-answer tests pinning the on-wire payload-checksum trailer, independent
+    // of the encoder's own implementation. "123456789" is the standard CRC check-value input: the
+    // CRC32C (Castagnoli) trailer must be its published check value 0xE3069283 -- proving CRC32C
+    // frames are UNprimed -- and the CRC32 trailer must equal a plain java.util.zip.CRC32 fed
+    // Crc's magic prefix {0xFA,0x2D,0x55,0xCA} and then the payload -- proving the historical
+    // priming survives byte-for-byte. Either assertion failing means the wire format changed and
+    // peers on other versions can no longer validate our frames.
+    @Test
+    public void testKnownAnswerTrailers()
+    {
+        byte[] payload = "123456789".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+
+        Assert.assertEquals(0xE3069283, encodedPayloadTrailer(FrameEncoderCrc.getInstance(org.apache.cassandra.utils.ChecksumType.CRC32C), payload));
+
+        java.util.zip.CRC32 primed = new java.util.zip.CRC32();
+        primed.update(new byte[] { (byte) 0xFA, (byte) 0x2D, (byte) 0x55, (byte) 0xCA });
+        primed.update(payload, 0, payload.length);
+        Assert.assertEquals((int) primed.getValue(), encodedPayloadTrailer(FrameEncoderCrc.instance, payload));
+    }
+
+    /** Encodes {@code bytes} as a single self-contained frame and returns its little-endian trailer int. */
+    private static int encodedPayloadTrailer(FrameEncoder encoder, byte[] bytes)
+    {
+        FrameEncoder.Payload payload = encoder.allocator().allocate(true, bytes.length);
+        payload.buffer.put(bytes);
+        payload.finish();
+        ByteBuf encoded = encoder.encode(true, payload.buffer);
+        try
+        {
+            int end = encoded.readableBytes();
+            return (encoded.getByte(end - 4) & 0xFF)
+                   | (encoded.getByte(end - 3) & 0xFF) << 8
+                   | (encoded.getByte(end - 2) & 0xFF) << 16
+                   | (encoded.getByte(end - 1) & 0xFF) << 24;
+        }
+        finally
+        {
+            encoded.release();
+        }
+    }
+
     // CASSANDRA-16360: an unrecognized framing id must raise a specific, clean exception rather than
     // a bare IllegalStateException, so it flows through the normal handshake-decode error handling
     // (see OutboundConnectionSettings.Framing.UnknownFramingException).

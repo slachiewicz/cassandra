@@ -43,7 +43,7 @@ public class EncryptedHintsWriter extends HintsWriter
      * @deprecated retained only for binary compatibility with existing callers compiled against the
      * concrete CRC32 signature; new code should call the {@link Checksum}-typed constructor.
      */
-    @Deprecated(since = "5.1")
+    @Deprecated(since = "7.0")
     protected EncryptedHintsWriter(File directory, HintsDescriptor descriptor, File file, FileChannel channel, int fd, CRC32 globalCRC)
     {
         this(directory, descriptor, file, channel, fd, (Checksum) globalCRC);

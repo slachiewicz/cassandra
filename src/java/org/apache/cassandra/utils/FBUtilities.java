@@ -1318,7 +1318,7 @@ public class FBUtilities
       * @deprecated retained only for binary compatibility with existing callers compiled against the
       * concrete CRC32 signature; new code should call {@link #updateChecksum(Checksum, ByteBuffer, int, int)}.
       */
-    @Deprecated(since = "5.1")
+    @Deprecated(since = "7.0")
     public static void updateChecksum(CRC32 checksum, ByteBuffer buffer, int offset, int length)
     {
         updateChecksum((Checksum) checksum, buffer, offset, length);
@@ -1348,7 +1348,7 @@ public class FBUtilities
      * @deprecated retained only for binary compatibility with existing callers compiled against the
      * concrete CRC32 signature; new code should call {@link #updateChecksum(Checksum, ByteBuffer)}.
      */
-    @Deprecated(since = "5.1")
+    @Deprecated(since = "7.0")
     public static void updateChecksum(CRC32 checksum, ByteBuffer buffer)
     {
         updateChecksum((Checksum) checksum, buffer);

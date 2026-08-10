@@ -55,6 +55,17 @@ public class FrameEncoderCrc extends FrameEncoder
         this.checksumType = checksumType;
     }
 
+    /**
+     * @deprecated this class previously had an implicit public no-arg constructor; retained only for
+     * binary compatibility with external code compiled against it. Use {@link #instance} or
+     * {@link #getInstance(ChecksumType)} instead.
+     */
+    @Deprecated(since = "7.0")
+    public FrameEncoderCrc()
+    {
+        this(ChecksumType.CRC32);
+    }
+
     public PayloadAllocator allocator()
     {
         return allocator;

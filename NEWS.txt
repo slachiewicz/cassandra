@@ -90,6 +90,14 @@ New features
       deployments that authenticate over mutual TLS. PasswordDefaultRoleInitializer
       remains the default and produces the historical behaviour. See CASSANDRA-21546
       for more information.
+    - Internode (non-compressed) framing can optionally checksum payloads with
+      CRC32C instead of CRC32, by setting internode_checksum_type: crc32c. It is
+      only actually used when storage_compatibility_mode is NONE, i.e. every node
+      in the cluster is already on a version that understands it; set
+      internode_checksum_type back to crc32 cluster-wide before downgrading any
+      node. CRC32C is 6-8x faster on x86_64 CPUs without a vectorized CRC32 path
+      (roughly, pre-AVX2 era) and measures neutral elsewhere; benchmark on your
+      own hardware before enabling. See CASSANDRA-16360.
 
 Upgrading
 ---------

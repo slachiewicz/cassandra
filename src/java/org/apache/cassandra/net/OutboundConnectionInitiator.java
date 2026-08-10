@@ -23,6 +23,7 @@ import java.net.InetSocketAddress;
 import java.nio.channels.ClosedChannelException;
 import java.security.cert.Certificate;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -38,6 +39,7 @@ import org.apache.cassandra.security.ISslContextFactory;
 import org.apache.cassandra.security.SSLFactory;
 import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.JVMStabilityInspector;
+import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.concurrent.AsyncPromise;
 import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 import org.apache.cassandra.utils.memory.BufferPools;
@@ -331,6 +333,18 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
         public void channelInactive(ChannelHandlerContext ctx) throws Exception
         {
             super.channelInactive(ctx);
+            // CASSANDRA-16360: a peer without CRC32C framing support cannot decode the framing id we
+            // just sent in Initiate; its Framing.forId fails and it closes the channel, which we
+            // observe here only as a generic mid-handshake close. There is no way to distinguish that
+            // from a network blip on this side, so when CRC32C was requested, log an actionable hint
+            // (the misconfigured side -- this one -- is the only side that can fix it).
+            if (settings.framing == OutboundConnectionSettings.Framing.CRC32C)
+                NoSpamLogger.log(logger, NoSpamLogger.Level.WARN, 1, TimeUnit.MINUTES,
+                                 "Peer {} closed the connection during handshake while CRC32C internode framing was requested. " +
+                                 "If this recurs, the peer may be running a version without CRC32C support, or have a mismatched " +
+                                 "internode_checksum_type/storage_compatibility_mode; set internode_checksum_type: crc32 (or " +
+                                 "storage_compatibility_mode: UPGRADING) on this node until every node in the cluster supports CRC32C framing.",
+                                 settings.connectToId());
             resultPromise.tryFailure(new ClosedChannelException());
         }
 
