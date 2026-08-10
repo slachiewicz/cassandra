@@ -20,8 +20,11 @@
 
 # CASSANDRA-16360: CRC32 → CRC32C Migration Plan
 
-> Status: PLANNING ONLY. No implementation code has been written. This document is
-> for review; implementation begins only after explicit approval, phase by phase.
+> Status: Phases 0–2 are **implemented** on this branch — Phase 0's benchmark
+> suite with three recorded runs (§2.2), Phase 1's plumbing (§3), and Phase 2's
+> opt-in internode CRC32C framing (§4, including its status note on what remains
+> open). Phase 3 (native protocol) and Phase 4 (on-disk formats) are not started.
+> Earlier sections written in the future tense are retained as the design record.
 
 ## 0. Ground rules (restated, binding across all phases)
 
@@ -384,13 +387,19 @@ toggles behave as expected (CRC32 2311 → 30121 ns, CRC32C 2300 → 74544 ns at
 **Reading for Phase 2/3 (as required by §4.3):** the gate — "≥20% at 16KB and
 128KB … on at least one of x86_64/ARM64" — is now formally **PASSED**, via
 RUN 2. The three runs together sharpen the claim: the CRC32C advantage is a
-property of **older x86_64** (SSE4.2 without a CLMUL-vectorized CRC32 path,
-i.e. the large installed base the ticket was motivated by), while
-current-generation CPUs (Zen 3 x86_64, Apple M1 arm64) show parity within
-±1%. Nowhere measured is CRC32C *slower* by more than noise (worst case
-−0.3%, 16KB DIRECT on Zen 3). So the migration's expected effect is
-"dramatic win on the old-hardware tail, neutral on modern hardware" — a
-safe-to-positive profile consistent with proceeding, with the caveat that
+property of **older x86_64** (SSE4.2 without a CLMUL-vectorized CRC32 path),
+while current-generation CPUs (Zen 3 x86_64, Apple M1 arm64) show parity
+within ±1%. Nowhere measured is CRC32C *slower* by more than noise (worst
+case −0.3%, 16KB DIRECT on Zen 3). Be precise about what "PASSED" therefore
+does and does not mean: the gate's "at least one platform" clause was written
+when the working assumption was that the CRC32C win generalized across
+hardware; the evidence shows it does not. The honest project-level case is
+**"opt-in benefit for the pre-AVX2-era x86 fleet, measured no-penalty
+everywhere else"** — a cohort that was the ticket's original (2020)
+motivation and that shrinks every year — not "CRC32C is faster." That is
+sufficient to justify Phase 2 as an **opt-in** feature with a `crc32`
+default (§4.3), and insufficient, on present evidence, to justify flipping
+the default or investing in Phase 3/4 on performance grounds alone. Caveat:
 JDK-8-era branches must still skip the software fallback (PureJavaCrc32C
 confirmed at only 1.1–1.65 GB/s on both x86 machines, i.e. 2–14× *slower*
 than intrinsic CRC32). All three runs used JDK 21.0.11; the §2.2 preamble's
@@ -458,7 +467,10 @@ a new test-scope JMH class.
 > - Every public/protected signature that would otherwise have been widened
 >   from concrete `CRC32` to `Checksum` in place (a **binary-incompatible**
 >   change for any external caller compiled against the old descriptor) was
->   instead given an additive, `@Deprecated(since="5.1")` `CRC32`-typed
+>   instead given an additive, `@Deprecated(since="7.0")` `CRC32`-typed
+>   (originally tagged `since="5.1"`; corrected in review, since trunk's
+>   `base.version` is 7.0 and the tag must name the release that first
+>   ships the deprecation)
 >   overload delegating to the new `Checksum`-typed one:
 >   `FBUtilities.updateChecksum` (×2), `CompressedHintsWriter`'s public
 >   constructor, `EncryptedHintsWriter`'s protected constructor (its class is
@@ -474,6 +486,17 @@ a new test-scope JMH class.
 >   compile) and 8 existing unit test suites across commit log, hints, and
 >   compressed-writer paths (all pass unmodified, confirming byte-identical
 >   behavior).
+> - A third review pass (2026-08-11) found one further binary-compatibility
+>   gap the above missed: giving `FrameEncoderCrc` a private
+>   `ChecksumType`-taking constructor silently *removed* the implicit public
+>   no-arg constructor the class had before. A `@Deprecated(since="7.0")`
+>   no-arg constructor delegating to CRC32 was restored. The same pass added
+>   known-answer trailer tests to `FramingTest`: the CRC32C frame trailer for
+>   the standard `"123456789"` input must equal the published Castagnoli
+>   check value `0xE3069283` (pinning "unprimed"), and the CRC32 trailer must
+>   equal a plain `java.util.zip.CRC32` fed the `Crc` magic prefix then the
+>   payload (pinning the historical priming byte-for-byte, independently of
+>   `Crc.java`'s implementation).
 
 **Goal:** make every framing/checksum code path accept a `ChecksumType`
 (or equivalent enum) parameter instead of hardcoding CRC32, with zero
@@ -542,13 +565,37 @@ byte-identical wire/disk output to today.
 
 ## 4. Phase 2 — Internode CRC32C, gated by StorageCompatibilityMode
 
-> **Status: design revised, implementation not started.** While scoping the
-> implementation, reading the actual `OutboundConnectionInitiator`/
+> **Status: implemented** (this branch), after a design revision: while scoping
+> the implementation, reading the actual `OutboundConnectionInitiator`/
 > `HandshakeProtocol` code revealed that the "per-connection negotiation,
 > lowest-common-version wins" design originally written below is **not
 > achievable as described**, for a concrete architectural reason (§4.1a).
-> The design has been corrected to §4.1b before any code was written, per
+> The design was corrected to §4.1b before any code was written, per
 > this project's own ground rule: never guess at wire-protocol safety.
+>
+> **Implemented:** `Framing.CRC32C(3)` + hardened `forId` throwing
+> `UnknownFramingException`; the `internode_checksum_type` yaml option and its
+> `StorageCompatibilityMode.NONE` gate in `framing(category)`; CRC32C encode/
+> decode in `FrameEncoderCrc`/`FrameDecoderCrc` (unprimed, per §4.1b); per-peer
+> `Framing` gauges on `InternodeOutboundMetrics`/`InternodeInboundMetrics`
+> (§4.6a); unit tests for the gating matrix, CRC32C round-trip, corruption
+> detection, known-answer trailer values, and log classification. Two
+> asymmetries worth knowing: **inbound acceptance is capability-based, not
+> config-based** — a node with this code decodes CRC32C framing from a peer
+> regardless of its own `internode_checksum_type`/compatibility-mode settings,
+> which is what makes the §4.5 config rollback safe with no restart-order
+> dependency (only senders consult the gate); and the §4.4 item 4 "operator
+> declared NONE too early" failure mode is surfaced on the *sending* node by a
+> dedicated no-spam WARN in `OutboundConnectionInitiator#channelInactive`
+> (see the §4.6a item 1 correction below for why the receiving old node cannot
+> produce a distinct message).
+>
+> **Not implemented (still open):** the §4.4 mixed-version /
+> mixed-compatibility-mode **dtests** (items 1–5) — the unit tests above cover
+> the gating logic and codecs but no multi-node rolling-upgrade orderings; and
+> the §4.4 end-to-end frame-path JMH re-run. These must land before
+> `internode_checksum_type: crc32c` is documented as recommended, per §7's
+> entry criteria.
 
 **Goal:** allow two nodes that both understand it to use CRC32C for
 internode frame checksums, with CRC32 remaining available forever for peers
@@ -623,6 +670,18 @@ built and already the idiom operators know from other post-4.0 rollouts.
   with no established rationale for CRC32C — plain, unprimed
   `ChecksumType.CRC32C.newInstance()` is the simplest defensible choice,
   matching how `ChecksumType.CRC32C` is used everywhere else in Phase 1).
+  Review note on why unprimed is safe here: the classic argument for
+  priming — an all-zeros region checksums to zero and so decodes as a
+  valid empty frame — does not apply to this framing, because the frame
+  header's CRC24 is computed with a non-zero init (`CRC24_INIT = 0x875060`,
+  `Crc.java`) and therefore rejects zeroed headers before the payload
+  checksum is ever consulted; and the framing algorithm is pinned
+  per-connection by the handshake, so there is no in-protocol ambiguity
+  for priming to disambiguate. Being unprimed also means the trailer for a
+  given payload equals the published Castagnoli test vectors
+  (`FramingTest#testKnownAnswerTrailers` pins `"123456789"` →
+  `0xE3069283`), which any future third-party implementation can verify
+  against directly.
 - `MessagingService.Version.VERSION_70` (next ordinal after `VERSION_60` —
   re-verify against the tree at implementation time, since this is
   advisory naming, not load-bearing for the gating mechanism above) can
@@ -686,15 +745,15 @@ tracked as a follow-on idea rather than folded into CASSANDRA-16360.
   `internode_checksum_type: crc32c` and get it immediately — no waiting on
   a `current_version`/messaging-version gate, since the gate is
   compatibility-mode-based, not version-based.
-- **Default for new clusters**: not before Phase 0's benchmark gate passes
-  on the actual target architecture (x86_64 — this plan's own Phase 0 run
-  was on Apple M1/arm64 and **failed** the gate, §2.2) and the dtests in
-  §4.4 are green. Given the gate's current fail status on the only
-  hardware tested so far, `internode_checksum_type` should default to
-  `crc32` indefinitely until an x86_64 Phase 0 run justifies flipping the
-  default — this is a config-default decision, not a version-enum one, so
-  it can be revisited independently per release without a new
-  `MessagingService.Version`.
+- **Default for new clusters**: not before the dtests in §4.4 are green.
+  The Phase 0 gate is now formally passed (§2.2 RUN 2, SSE4.2-era x86_64),
+  but the three-platform picture (§2.2 summary) shows the win is confined
+  to the older-x86 hardware cohort while modern x86_64 and arm64 measure
+  parity — so flipping the default buys nothing for current-generation
+  fleets and the perf case alone does not justify the churn. Keep
+  `internode_checksum_type: crc32` as the shipped default; revisit as a
+  config-default decision (not a version-enum one) if/when the §4.4 dtests
+  are green and operator demand on older-x86 fleets warrants it.
 
 ### 4.4 Test plan
 
@@ -761,13 +820,20 @@ tracked as a follow-on idea rather than folded into CASSANDRA-16360.
   operators already use to disable other not-yet-trusted post-4.0 behavior,
   so no new operational knowledge is required.
 - Full downgrade rollback: downgrading the binary on a node reverts it to
-  code that has no `Framing.CRC32C` case at all; per §4.4 item 4, this
-  needs the `Framing.forId` hardening to fail cleanly rather than crash —
-  without that hardening, downgrade rollback is **not safe** and must not
-  be documented as supported until it's implemented. No data is written to
-  disk in a CRC32C-dependent format in this phase (internode wire framing
-  only), so rollback carries no data-loss risk, only the connection-crash
-  risk just described.
+  code that has no `Framing.CRC32C` case at all — and, critically, no
+  `Framing.forId` hardening either, since that hardening ships in the *new*
+  code and cannot retroactively improve a downgraded binary. A peer still
+  configured with `crc32c` will therefore drive the downgraded node's
+  `forId` into its original `IllegalStateException`, which its generic
+  handshake error handling logs and closes on — repeatedly, as the peer
+  keeps reconnecting, with messaging between the pair down the whole time.
+  **Operational order therefore matters: set `internode_checksum_type:
+  crc32` (or a non-`NONE` `storage_compatibility_mode`) cluster-wide
+  *before* downgrading any binary.** The sending side's mid-handshake-close
+  WARN (§4.6a item 1 correction) is the signal that this order was violated.
+  No data is written to disk in a CRC32C-dependent format in this phase
+  (internode wire framing only), so rollback carries no data-loss risk,
+  only the connection-outage risk just described.
 
 ### 4.6a Resolved during domain-modeling review (2026-07-17)
 
@@ -791,6 +857,24 @@ landed, and settled the open design questions attached to each:
    already special-cases `InvalidLegacyProtocolMagic` with its own
    no-spam warning one branch above the generic case. `UnknownFramingException`
    needs the same kind of dedicated, distinctly-worded log branch.
+
+   *Correction from implementation review (2026-08-11):* the dedicated inbound
+   log branch was added to `InboundConnectionInitiator#exceptionCaught`, but it
+   is **defensive only — unreachable from the wire on any node running this
+   code**: the handshake framing field is 2 bits (`Initiate.encodeFlags`), and
+   with `CRC32C(3)` all four encodable values now map to a `Framing`, so
+   `forId` can only throw for ids that cannot be expressed on the wire (it
+   would become reachable if the id space is ever widened). In the real
+   "operator declared NONE too early" scenario the unknown id arrives at an
+   **old** node running **old** code, which throws its original
+   `IllegalStateException` into its generic handshake-failure logging — nothing
+   this branch ships can improve the old side's message. The actionable signal
+   therefore lives on the *sending* (new, misconfigured-relative-to-cluster)
+   node instead: `OutboundConnectionInitiator#channelInactive` emits a
+   dedicated no-spam WARN when a connection whose settings requested
+   `Framing.CRC32C` is closed mid-handshake, naming `internode_checksum_type`
+   and `storage_compatibility_mode` as the levers. That side is also the only
+   side an operator can fix without upgrading binaries.
 2. **Outbound framing needs a per-peer metric.** No JMX/metrics artifact
    exposing "negotiated framing type" existed anywhere in the tree, which
    means the §4.4 item 3 mixed-version dtest ("verify via internode
@@ -1054,10 +1138,11 @@ local `trunk`) rather than assumed:
   ordinal, then later flip current_version" two-step for this feature the
   way there was for `VERSION_60`.
 - **`internode_checksum_type: crc32c` becomes the shipped default**: only
-  after (a) Phase 0's benchmark gate has passed on the target JDK/arch
-  (x86_64 — this plan's own arm64 run failed the gate, §2.2), and (b) the
-  dtests in §4.4 are green in CI, including the `Framing.forId` hardening
-  in §4.4 item 4 / §4.6 item 1. Recommend this happens no earlier than the
+  after (a) the hardware-cohort question is weighed — the Phase 0 gate is
+  passed (§2.2 RUN 2, SSE4.2-era x86_64) but modern x86_64/arm64 measure
+  parity, see the §2.2 summary and §4.3 — and (b) the
+  dtests in §4.4 are green in CI (the `Framing.forId` hardening
+  in §4.4 item 4 / §4.6 item 1 is implemented; the dtests themselves are not). Recommend this happens no earlier than the
   first alpha of the release that carries Phase 2, giving a full alpha/beta
   soak period even though the mechanism itself doesn't require it — a
   risk-management choice, not a technical requirement.
