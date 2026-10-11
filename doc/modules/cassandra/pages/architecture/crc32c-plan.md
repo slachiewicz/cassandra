@@ -482,6 +482,55 @@ grep -o -w -E 'sse4_2|pclmulqdq|vpclmulqdq|avx2|avx512f' /proc/cpuinfo | sort -u
 **Non-goal for Phase 0:** no production code changes. This phase only adds
 a new test-scope JMH class.
 
+
+### 2.5 Next runs: Azure (planned 2026-10-12)
+
+The open §2.2 runs, the frame-path JMH run (§4.4) and an end-to-end CPU-share
+measurement (§2.4) are planned on Azure, JDK 17 only. Nothing has run yet.
+
+**Availability.** Checked with `az vm list-skus` for one subscription; other
+subscriptions may see different restrictions.
+
+| Target CPU | Size | Where |
+|---|---|---|
+| Intel Ice Lake / Sapphire Rapids | `D8s_v5` | Poland Central |
+| Intel Emerald Rapids | `D8s_v6` | Poland Central |
+| AMD Milan or Genoa (Azure picks) | `D8as_v5` | Poland Central |
+| AMD Genoa | `D8as_v6` | Poland Central |
+| ARM Ampere Altra | `D4ps_v5` | Sweden Central (only EU region with both ARM sizes) |
+| ARM Cobalt 100 | `D4ps_v6` | Sweden Central |
+| Intel Haswell / Broadwell | — | Not reachable on Azure: no EU region offers Dv3, and Dv2/DSv2 quota increases are refused (`DeprecatedQuotaType`); the only Dv2 sizes offered need 20 vCPUs |
+
+Haswell/Broadwell, the cohort where CRC32C is expected to win (§2.2), needs
+hardware outside Azure, e.g. the Rackspace Spot pool used for RUN 2.
+
+**Procedure.**
+1. Build once locally with JDK 17; upload the Cassandra jar, its library
+   jars and the microbench classes (~80 MB compressed) to blob storage. No
+   VM compiles anything.
+2. Per VM, cloud-init installs Temurin 17, records `lscpu`, the CPU flags and
+   `-XX:+PrintFlagsFinal | grep -E 'UseCRC32(C)?Intrinsics|UseCLMUL'`, runs
+   the §2.3 sweep with `-f 3` plus the frame-path benchmark, and uploads the
+   CSVs. A local script deletes each resource group as soon as its results
+   arrive.
+3. End-to-end: 3 nodes plus a client on `D4as_v6`, `cassandra-stress` mixed
+   workload, RF=3, QUORUM, `internode_compression` `none` and `all`, five
+   alternating `crc32`/`crc32c` rounds, async-profiler to attribute CPU to
+   internode and on-disk CRC calls (§6).
+4. Mixed-version: 3 × `D2as_v6`, rolling one node between `6.0-alpha3` and
+   this branch, checking the `PayloadChecksum` gauges (§4.4).
+
+**Estimated cost** (Linux pay-as-you-go, Azure Retail Prices API,
+2026-10-12; disks, IPs and egress excluded):
+
+| Scope | vCPU-h | Cost (USD) |
+|---|---|---|
+| Benchmarks on all six sizes (~1.05 h each) | 42 | 2.22 |
+| End-to-end cluster on `D4as_v6` (4 VMs × 4 h) | 64 | 3.52 |
+| Mixed-version check (3 VMs × 2 h) | 12 | 0.66 |
+| **Total** | **118** | **6.40** |
+| Alternative: end-to-end cluster on all six sizes | 438 total | 22.30 total |
+
 ---
 
 ## 3. Phase 1 — Plumbing (no behavior change)
