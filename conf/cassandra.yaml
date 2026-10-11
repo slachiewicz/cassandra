@@ -2022,7 +2022,7 @@ internode_compression: dc
 #   safe to set at any point of a rolling upgrade or downgrade. Applies to
 #   both compressed and uncompressed connections. Benchmark on your own
 #   hardware before enabling: CRC32C measured ~7x faster on an Ivy Bridge
-#   Xeon and no faster on AMD Zen 3 or Apple M1 (see
+#   Xeon and no faster on a recent AMD EPYC or Apple M1 (see
 #   doc/modules/cassandra/pages/architecture/crc32c-plan.md, Phase 0).
 internode_checksum_type: crc32
 

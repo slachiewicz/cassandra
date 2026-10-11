@@ -42,7 +42,7 @@ import static org.junit.Assert.assertTrue;
  * CASSANDRA-16360: {@link OutboundConnectionSettings.Framing.UnknownFramingException} (a peer sending an
  * internode framing id this node doesn't recognize, e.g. from a newer release) must be logged distinctly from a
  * real {@link org.apache.cassandra.utils.Crc.InvalidCrc} corruption event, so an operator can tell a version
- * mismatch from possible data corruption from logs alone. See crc32c-plan.md §4.6a.
+ * mismatch from possible data corruption from logs alone. See crc32c-plan.md §4.6.
  */
 public class InboundConnectionInitiatorTest
 {

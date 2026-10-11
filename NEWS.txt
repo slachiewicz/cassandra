@@ -95,7 +95,7 @@ New features
       connection negotiates it during the handshake: a peer on an older release
       ignores the request and the connection keeps CRC32, so the setting is safe
       at any point of a rolling upgrade or downgrade. CRC32C measured 6-8x
-      faster on an Ivy Bridge Xeon and neutral on AMD Zen 3 and Apple M1;
+      faster on an Ivy Bridge Xeon and neutral on a recent AMD EPYC and Apple M1;
       benchmark on your own hardware before enabling. See CASSANDRA-16360.
 
 Upgrading

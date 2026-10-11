@@ -139,7 +139,7 @@ public class FrameEncoderCrc extends FrameEncoder
      * historical behavior, including its magic-prefix priming -- this is load-bearing for
      * byte-identical wire compatibility with every prior release. CRC32C intentionally does *not*
      * reuse that priming: it was CRC32-specific tuning with no established rationale for CRC32C
-     * (see doc/modules/cassandra/pages/architecture/crc32c-plan.md §4.1b), so CRC32C frames are a
+     * (see doc/modules/cassandra/pages/architecture/crc32c-plan.md §4.1), so CRC32C frames are a
      * plain, unprimed checksum over the same payload bytes.
      */
     private long computePayloadChecksum(ByteBuffer payload)
