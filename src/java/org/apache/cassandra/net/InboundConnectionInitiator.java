@@ -286,6 +286,8 @@ public class InboundConnectionInitiator
         private final InboundConnectionSettings settings;
 
         private HandshakeProtocol.Initiate initiate;
+        // CASSANDRA-16360: whether this connection's frames carry CRC32C payload checksums
+        private boolean useCrc32c;
 
         /**
          * A future the essentially places a timeout on how long we'll wait for the peer
@@ -344,7 +346,10 @@ public class InboundConnectionInitiator
                 accept = settings.acceptMessaging;
 
             int useMessagingVersion = max(accept.min, min(accept.max, initiate.acceptVersions.max));
-            ByteBuf flush = new HandshakeProtocol.Accept(useMessagingVersion, accept.max).encode(ctx.alloc());
+            // CASSANDRA-16360: any node with this code decodes CRC32C payload checksums, whatever its own
+            // internode_checksum_type; only the initiator's setting decides whether the connection uses them
+            useCrc32c = initiate.requestsCrc32c && initiate.type.isMessaging() && initiate.framing.hasPayloadChecksum();
+            ByteBuf flush = new HandshakeProtocol.Accept(useMessagingVersion, accept.max, useCrc32c).encode(ctx.alloc());
 
             AsyncChannelPromise.writeAndFlush(ctx, flush, (ChannelFutureListener) future -> {
                 if (!future.isSuccess())
@@ -401,9 +406,8 @@ public class InboundConnectionInitiator
             else if (cause != null && Throwables.getRootCause(cause) instanceof Message.InvalidLegacyProtocolMagic && DatabaseDescriptor.getInvalidLegacyProtocolMagicNoSpamEnabled())
                 noSpam5m.warn("Failed to properly handshake with peer {}. Closing the channel. Invalid legacy protocol magic.", ((InetSocketAddress) channel.remoteAddress()).getHostName());
             else if (unknownFraming != null)
-                logger.warn("Peer {} sent an unrecognized internode framing id {} while handshaking. This " +
-                            "usually means the peer predates CRC32C framing support, or internode_checksum_type " +
-                            "/ storage_compatibility_mode are inconsistent across the cluster -- not data " +
+                logger.warn("Peer {} sent an unrecognized internode framing id {} while handshaking; it is probably " +
+                            "running a newer release with a framing this node does not support. This is not data " +
                             "corruption. Closing the channel.", remoteAddress, unknownFraming.id);
             else
                 logger.error("Failed to properly handshake with peer {}. Closing the channel.", remoteAddress, cause);
@@ -499,26 +503,23 @@ public class InboundConnectionInitiator
             }
 
             FrameDecoder frameDecoder;
+            ChecksumType payloadChecksum = useCrc32c ? ChecksumType.CRC32C : ChecksumType.CRC32;
             switch (initiate.framing)
             {
                 case LZ4:
                 {
-                    frameDecoder = FrameDecoderLZ4.fast(allocator, ChecksumType.CRC32);
+                    frameDecoder = FrameDecoderLZ4.fast(allocator, payloadChecksum);
                     break;
                 }
                 case CRC:
                 {
-                    frameDecoder = FrameDecoderCrc.create(allocator, ChecksumType.CRC32);
-                    break;
-                }
-                case CRC32C:
-                {
-                    frameDecoder = FrameDecoderCrc.create(allocator, ChecksumType.CRC32C);
+                    frameDecoder = FrameDecoderCrc.create(allocator, payloadChecksum);
                     break;
                 }
                 case UNPROTECTED:
                 {
                     frameDecoder = new FrameDecoderUnprotected(allocator);
+                    payloadChecksum = null;
                     break;
                 }
                 default:
@@ -528,12 +529,13 @@ public class InboundConnectionInitiator
             frameDecoder.addLastTo(pipeline);
 
             InboundMessageHandler handler =
-                settings.handlers.apply(from).createHandler(frameDecoder, initiate.framing, initiate.type, pipeline.channel(), useMessagingVersion);
+                settings.handlers.apply(from).createHandler(frameDecoder, payloadChecksum, initiate.type, pipeline.channel(), useMessagingVersion);
 
-            logger.info("{} messaging connection established, version = {}, framing = {}, encryption = {}",
+            logger.info("{} messaging connection established, version = {}, framing = {}, payload checksum = {}, encryption = {}",
                         handler.id(true),
                         useMessagingVersion,
                         initiate.framing,
+                        payloadChecksum,
                         SocketFactory.encryptionConnectionSummary(pipeline.channel()));
 
             pipeline.addLast("deserialize", handler);

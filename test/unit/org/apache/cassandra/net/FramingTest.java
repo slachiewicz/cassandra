@@ -126,22 +126,35 @@ public class FramingTest
                        FrameDecoderCrc.create(GlobalBufferPoolAllocator.instance, org.apache.cassandra.utils.ChecksumType.CRC32C));
     }
 
-    // CASSANDRA-16360: a CRC32C-framed payload corrupted after encoding must be caught as a
+    // CASSANDRA-16360: CRC32C payload checksums with LZ4 framing, negotiated the same way as with CRC framing
+    @Test
+    public void testRandomLZ4Crc32c()
+    {
+        testSomeFrames(FrameEncoderLZ4.getInstance(org.apache.cassandra.utils.ChecksumType.CRC32C),
+                       FrameDecoderLZ4.fast(GlobalBufferPoolAllocator.instance, org.apache.cassandra.utils.ChecksumType.CRC32C));
+    }
+
+    // CASSANDRA-16360: a CRC32C-checksummed payload corrupted after encoding must be caught as a
     // recoverable checksum failure, the same as the existing CRC32 path -- not silently accepted.
     @Test
     public void testCorruptCrc32cFrameIsDetected()
     {
-        FrameEncoder encoder = FrameEncoderCrc.getInstance(org.apache.cassandra.utils.ChecksumType.CRC32C);
-        FrameDecoder decoder = FrameDecoderCrc.create(GlobalBufferPoolAllocator.instance, org.apache.cassandra.utils.ChecksumType.CRC32C);
+        assertCorruptionDetected(FrameEncoderCrc.getInstance(org.apache.cassandra.utils.ChecksumType.CRC32C),
+                                 FrameDecoderCrc.create(GlobalBufferPoolAllocator.instance, org.apache.cassandra.utils.ChecksumType.CRC32C));
+        assertCorruptionDetected(FrameEncoderLZ4.getInstance(org.apache.cassandra.utils.ChecksumType.CRC32C),
+                                 FrameDecoderLZ4.fast(GlobalBufferPoolAllocator.instance, org.apache.cassandra.utils.ChecksumType.CRC32C));
+    }
 
+    private static void assertCorruptionDetected(FrameEncoder encoder, FrameDecoder decoder)
+    {
         byte[] bytes = randomishBytes(new Random(1), 64, 128);
         FrameEncoder.Payload payload = encoder.allocator().allocate(true, bytes.length);
         payload.buffer.put(bytes);
         payload.finish();
 
         ByteBuf encoded = encoder.encode(true, payload.buffer);
-        // flip one bit in the middle of the payload, well clear of the header and trailer
-        int corruptIndex = FrameEncoderCrc.HEADER_LENGTH + bytes.length / 2;
+        // flip one bit in the middle of the frame, well clear of the header and trailer
+        int corruptIndex = encoded.readerIndex() + encoded.readableBytes() / 2;
         encoded.setByte(corruptIndex, encoded.getByte(corruptIndex) ^ 0x01);
 
         ByteBuffer frame = BufferPools.forNetworking().getAtLeast(encoded.readableBytes(), BufferType.OFF_HEAP);
@@ -154,7 +167,8 @@ public class FramingTest
         decoder.decode(out, shareable);
 
         Assert.assertEquals(1, out.size());
-        Assert.assertTrue("expected a CorruptFrame for a bit-flipped CRC32C payload", out.get(0) instanceof FrameDecoder.CorruptFrame);
+        Assert.assertTrue("expected a CorruptFrame for a bit-flipped CRC32C payload from " + encoder.getClass().getSimpleName(),
+                          out.get(0) instanceof FrameDecoder.CorruptFrame);
         out.get(0).release();
     }
 
@@ -176,6 +190,10 @@ public class FramingTest
         primed.update(new byte[] { (byte) 0xFA, (byte) 0x2D, (byte) 0x55, (byte) 0xCA });
         primed.update(payload, 0, payload.length);
         Assert.assertEquals((int) primed.getValue(), encodedPayloadTrailer(FrameEncoderCrc.instance, payload));
+
+        // "123456789" does not compress, so LZ4 frames store it as-is and the trailers are the same values
+        Assert.assertEquals(0xE3069283, encodedPayloadTrailer(FrameEncoderLZ4.getInstance(org.apache.cassandra.utils.ChecksumType.CRC32C), payload));
+        Assert.assertEquals((int) primed.getValue(), encodedPayloadTrailer(FrameEncoderLZ4.fastInstance, payload));
     }
 
     /** Encodes {@code bytes} as a single self-contained frame and returns its little-endian trailer int. */
@@ -205,7 +223,8 @@ public class FramingTest
     @Test
     public void testUnknownFramingIdRejectedCleanly()
     {
-        for (int id : new int[]{ 4, 5, 255 })
+        // id 3 is unassigned: CRC32C is negotiated in the handshake, not encoded as a framing
+        for (int id : new int[]{ 3, 4, 5, 255 })
         {
             try
             {

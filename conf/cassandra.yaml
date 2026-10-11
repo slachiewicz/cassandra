@@ -2008,22 +2008,21 @@ client_encryption_options:
 #   nothing is compressed.
 internode_compression: dc
 
-# internode_checksum_type controls which checksum algorithm is requested for
-# internode CRC-framed connections (CASSANDRA-16360).
+# internode_checksum_type controls which payload checksum this node requests
+# for the internode messaging connections it opens (CASSANDRA-16360).
 # Can be:
 #
 # crc32
 #   the traditional CRC-32 (IEEE 802.3) algorithm.
 #
 # crc32c
-#   the Castagnoli CRC-32C algorithm. Used only on uncompressed connections,
-#   only when storage_compatibility_mode is NONE, and only to peers that
-#   cluster metadata records at a release that understands CRC32C framing;
-#   every other connection keeps crc32, so this is safe to set during a
-#   rolling upgrade. Takes effect for connections created after a restart.
-#   Benchmark on your own hardware before enabling: CRC32C was much faster
-#   only on older x86_64 CPUs (Sandy Bridge, Ivy Bridge), and no faster on
-#   AMD Zen 3 or Apple M1 (see
+#   the Castagnoli CRC-32C algorithm. Each connection asks the peer during
+#   the handshake and uses crc32c only if the peer agrees; peers on older
+#   releases ignore the request and the connection keeps crc32, so this is
+#   safe to set at any point of a rolling upgrade or downgrade. Applies to
+#   both compressed and uncompressed connections. Benchmark on your own
+#   hardware before enabling: CRC32C measured ~7x faster on an Ivy Bridge
+#   Xeon and no faster on AMD Zen 3 or Apple M1 (see
 #   doc/modules/cassandra/pages/architecture/crc32c-plan.md, Phase 0).
 internode_checksum_type: crc32
 

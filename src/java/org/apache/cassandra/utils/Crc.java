@@ -20,6 +20,7 @@ package org.apache.cassandra.utils;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.zip.CRC32;
+import java.util.zip.CRC32C;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.util.concurrent.FastThreadLocal;
@@ -32,6 +33,15 @@ public class Crc
         protected CRC32 initialValue()
         {
             return new CRC32();
+        }
+    };
+
+    private static final FastThreadLocal<CRC32C> crc32c = new FastThreadLocal<CRC32C>()
+    {
+        @Override
+        protected CRC32C initialValue()
+        {
+            return new CRC32C();
         }
     };
 
@@ -85,6 +95,25 @@ public class Crc
         crc.update(buffer);
         buffer.limit(saveLimit);
         buffer.position(savePosition);
+    }
+
+    /**
+     * CRC32C of {@code buffer[start, end)}, leaving the buffer's position and limit unchanged. Unlike
+     * {@link #crc32()} this is not primed with a magic prefix, so the result matches the published CRC-32C
+     * check values. Used for internode frame payloads once both peers have negotiated CRC32C (CASSANDRA-16360).
+     */
+    public static int computeCrc32c(ByteBuffer buffer, int start, int end)
+    {
+        CRC32C crc = crc32c.get();
+        crc.reset();
+        int savePosition = buffer.position();
+        int saveLimit = buffer.limit();
+        buffer.limit(end);
+        buffer.position(start);
+        crc.update(buffer);
+        buffer.limit(saveLimit);
+        buffer.position(savePosition);
+        return (int) crc.getValue();
     }
 
     private static final int CRC24_INIT = 0x875060;

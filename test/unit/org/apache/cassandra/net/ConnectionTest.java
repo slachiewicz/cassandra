@@ -51,6 +51,7 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions.Builder;
@@ -64,6 +65,7 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.transport.TlsTestUtils;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.FBUtilities;
 
 import io.netty.buffer.ByteBuf;
@@ -303,6 +305,38 @@ public class ConnectionTest
                            .error    ( 0,  0)
                            .check();
         });
+    }
+
+    // CASSANDRA-16360: the initiator's internode_checksum_type decides the payload checksum; both ends of every
+    // CRC- and LZ4-framed connection (with and without encryption, small and large) must agree on it and deliver.
+    @Test
+    public void testNegotiatedPayloadChecksum() throws Throwable
+    {
+        Config.InternodeChecksumType original = DatabaseDescriptor.internodeChecksumType();
+        try
+        {
+            for (Config.InternodeChecksumType requested : Config.InternodeChecksumType.values())
+            {
+                DatabaseDescriptor.setInternodeChecksumType(requested);
+                ChecksumType expected = requested == Config.InternodeChecksumType.crc32c ? ChecksumType.CRC32C : ChecksumType.CRC32;
+                test((inbound, outbound, endpoint) -> {
+                    int count = 10;
+                    CountDownLatch receiveDone = new CountDownLatch(count);
+                    unsafeSetHandler(Verb._TEST_1, () -> msg -> receiveDone.countDown());
+                    Message<?> message = Message.out(Verb._TEST_1, noPayload);
+                    for (int i = 0 ; i < count ; ++i)
+                        outbound.enqueue(message);
+
+                    Assert.assertTrue(receiveDone.await(10, SECONDS));
+                    Assert.assertEquals(expected, outbound.payloadChecksum());
+                    Assert.assertEquals(expected.name(), inbound.currentPayloadChecksumName());
+                });
+            }
+        }
+        finally
+        {
+            DatabaseDescriptor.setInternodeChecksumType(original);
+        }
     }
 
     @Test

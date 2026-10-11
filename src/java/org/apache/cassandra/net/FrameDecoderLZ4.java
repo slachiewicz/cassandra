@@ -29,6 +29,7 @@ import org.apache.cassandra.utils.ChecksumType;
 
 import io.netty.channel.ChannelPipeline;
 
+import static org.apache.cassandra.utils.Crc.computeCrc32c;
 import static org.apache.cassandra.utils.Crc.crc24;
 import static org.apache.cassandra.utils.Crc.crc32;
 import static org.apache.cassandra.utils.Crc.updateCrc32;
@@ -96,7 +97,7 @@ public final class FrameDecoderLZ4 extends FrameDecoderWith8bHeader
     }
 
     private final LZ4SafeDecompressor decompressor;
-    // CASSANDRA-16360 Phase 1 plumbing: see FrameDecoderCrc for why only CRC32 is functionally wired.
+    // CASSANDRA-16360: payload checksum algorithm, negotiated per connection in the handshake
     private final ChecksumType checksumType;
 
     private FrameDecoderLZ4(BufferPoolAllocator allocator, LZ4SafeDecompressor decompressor, ChecksumType checksumType)
@@ -129,22 +130,26 @@ public final class FrameDecoderLZ4 extends FrameDecoderWith8bHeader
 
     final Frame unpackFrame(ShareableBytes bytes, int begin, int end, long header8b)
     {
-        if (checksumType != ChecksumType.CRC32)
-            // CASSANDRA-16360: not a "not yet" TODO -- see FrameEncoderLZ4#getInstance.
-            throw new UnsupportedOperationException(checksumType + " frame payload checksums are not implemented for LZ4 framing");
-
         ByteBuffer input = bytes.get();
 
         boolean isSelfContained = isSelfContained(header8b);
         int uncompressedLength = uncompressedLength(header8b);
 
-        CRC32 crc = crc32();
         int readFullCrc = input.getInt(end - TRAILER_LENGTH);
         if (input.order() == ByteOrder.BIG_ENDIAN)
             readFullCrc = Integer.reverseBytes(readFullCrc);
 
-        updateCrc32(crc, input, begin + HEADER_LENGTH, end - TRAILER_LENGTH);
-        int computeFullCrc = (int) crc.getValue();
+        int computeFullCrc;
+        if (checksumType == ChecksumType.CRC32)
+        {
+            CRC32 crc = crc32();
+            updateCrc32(crc, input, begin + HEADER_LENGTH, end - TRAILER_LENGTH);
+            computeFullCrc = (int) crc.getValue();
+        }
+        else
+        {
+            computeFullCrc = computeCrc32c(input, begin + HEADER_LENGTH, end - TRAILER_LENGTH);
+        }
 
         if (readFullCrc != computeFullCrc)
             return CorruptFrame.recoverable(isSelfContained, uncompressedLength, readFullCrc, computeFullCrc);

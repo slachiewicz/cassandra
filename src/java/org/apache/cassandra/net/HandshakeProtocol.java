@@ -73,9 +73,9 @@ class HandshakeProtocol
      *                      1 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 3 3
      *  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
      * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-     * |C C C M C      |    REQUEST    |      MIN      |      MAX      |
-     * |A A M O R      |    VERSION    |   SUPPORTED   |   SUPPORTED   |
-     * |T T P D C      |  (DEPRECATED) |    VERSION    |    VERSION    |
+     * |C C C M C C    |    REQUEST    |      MIN      |      MAX      |
+     * |A A M O R 3    |    VERSION    |   SUPPORTED   |   SUPPORTED   |
+     * |T T P D C 2    |  (DEPRECATED) |    VERSION    |    VERSION    |
      * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
      * }
      * </pre>
@@ -83,6 +83,9 @@ class HandshakeProtocol
      * CMP - compression enabled bit
      * MOD - connection mode; if the bit is on, the connection is for streaming; if the bit is off, it is for inter-node messaging.
      * CRC - crc enabled bit
+     * C32 - CRC32C payload checksums requested (CASSANDRA-16360). Releases that predate it ignore the bit; a peer
+     *       that honours it says so in {@link Accept}, and only then do both sides switch the payload checksum
+     *       of {@link Framing#CRC} and {@link Framing#LZ4} frames from CRC32 to CRC32C.
      * VERSION - {@link org.apache.cassandra.net.MessagingService#current_version}
      */
     static class Initiate
@@ -96,13 +99,20 @@ class HandshakeProtocol
         final AcceptVersions acceptVersions;
         final ConnectionType type;
         final Framing framing;
+        final boolean requestsCrc32c;
         final InetAddressAndPort from;
 
         Initiate(AcceptVersions acceptVersions, ConnectionType type, Framing framing, InetAddressAndPort from)
         {
+            this(acceptVersions, type, framing, false, from);
+        }
+
+        Initiate(AcceptVersions acceptVersions, ConnectionType type, Framing framing, boolean requestsCrc32c, InetAddressAndPort from)
+        {
             this.acceptVersions = acceptVersions;
             this.type = type;
             this.framing = framing;
+            this.requestsCrc32c = requestsCrc32c;
             this.from = from;
         }
 
@@ -116,6 +126,8 @@ class HandshakeProtocol
 
             // framing id is split over 2nd and 4th bits, for backwards compatibility
             flags |= ((framing.id & 1) << 2) | ((framing.id & 2) << 3);
+            if (requestsCrc32c)
+                flags |= 1 << 5;
             flags |= (acceptVersions.min << 8); // legacy (pre40)
             flags |= (acceptVersions.min << 16);
             flags |= (acceptVersions.max << 24);
@@ -165,6 +177,7 @@ class HandshakeProtocol
 
                 int framingBits = getBits(flags, 2, 1) | (getBits(flags, 4, 1) << 1);
                 Framing framing = Framing.forId(framingBits);
+                boolean requestsCrc32c = getBits(flags, 5, 1) == 1;
 
                 boolean isStream = getBits(flags, 3, 1) == 1;
 
@@ -180,7 +193,7 @@ class HandshakeProtocol
                     throw new InvalidCrc(read, computed);
 
                 buf.skipBytes(nio.position() - start);
-                return new Initiate(new AcceptVersions(minMessagingVersion, maxMessagingVersion), type, framing, from);
+                return new Initiate(new AcceptVersions(minMessagingVersion, maxMessagingVersion), type, framing, requestsCrc32c, from);
 
             }
             catch (EOFException e)
@@ -198,16 +211,17 @@ class HandshakeProtocol
             Initiate that = (Initiate)other;
             return    this.type == that.type
                    && this.framing == that.framing
+                   && this.requestsCrc32c == that.requestsCrc32c
                    && Objects.equals(this.acceptVersions, that.acceptVersions);
         }
 
         @Override
         public String toString()
         {
-            return String.format("Initiate(min: %d, max: %d, type: %s, framing: %b, from: %s)",
+            return String.format("Initiate(min: %d, max: %d, type: %s, framing: %s, requestsCrc32c: %b, from: %s)",
                                  acceptVersions.min,
                                  acceptVersions.max,
-                                 type, framing, from);
+                                 type, framing, requestsCrc32c, from);
         }
     }
 
@@ -222,26 +236,37 @@ class HandshakeProtocol
      *      or if not the closest version that this peer could support to the ones requested
      *   3) a CRC protecting the integrity of the message
      *
+     * When the {@link Initiate} requested CRC32C payload checksums and this peer will decode them, bit
+     * {@link #CRC32C_ACCEPTED_BIT} of the first int is set (CASSANDRA-16360). The bit is only ever sent to an
+     * initiator that set the request bit, so releases that predate it never see it.
      */
     static class Accept
     {
         /** The messaging version sent by the receiving peer (int). */
         private static final int MAX_LENGTH = 12;
+        static final int CRC32C_ACCEPTED_BIT = 1 << 30;
 
         final int useMessagingVersion;
         final int maxMessagingVersion;
+        final boolean crc32cAccepted;
 
         Accept(int useMessagingVersion, int maxMessagingVersion)
         {
+            this(useMessagingVersion, maxMessagingVersion, false);
+        }
+
+        Accept(int useMessagingVersion, int maxMessagingVersion, boolean crc32cAccepted)
+        {
             this.useMessagingVersion = useMessagingVersion;
             this.maxMessagingVersion = maxMessagingVersion;
+            this.crc32cAccepted = crc32cAccepted;
         }
 
         ByteBuf encode(ByteBufAllocator allocator)
         {
             ByteBuf buffer = allocator.directBuffer(MAX_LENGTH);
             buffer.clear();
-            buffer.writeInt(maxMessagingVersion);
+            buffer.writeInt(crc32cAccepted ? maxMessagingVersion | CRC32C_ACCEPTED_BIT : maxMessagingVersion);
             buffer.writeInt(useMessagingVersion);
             buffer.writeInt(computeCrc32(buffer, 0, 8));
             return buffer;
@@ -252,7 +277,9 @@ class HandshakeProtocol
             int readerIndex = in.readerIndex();
             if (in.readableBytes() < 4)
                 return null;
-            int maxMessagingVersion = in.readInt();
+            int firstInt = in.readInt();
+            boolean crc32cAccepted = (firstInt & CRC32C_ACCEPTED_BIT) != 0;
+            int maxMessagingVersion = firstInt & ~CRC32C_ACCEPTED_BIT;
             int useMessagingVersion = 0;
 
             // pre-4.0 not supported, close the connection
@@ -272,7 +299,7 @@ class HandshakeProtocol
             if (read != computed)
                 throw new InvalidCrc(read, computed);
 
-            return new Accept(useMessagingVersion, maxMessagingVersion);
+            return new Accept(useMessagingVersion, maxMessagingVersion, crc32cAccepted);
         }
 
         @Override
@@ -280,13 +307,14 @@ class HandshakeProtocol
         {
             return other instanceof Accept
                    && this.useMessagingVersion == ((Accept) other).useMessagingVersion
-                   && this.maxMessagingVersion == ((Accept) other).maxMessagingVersion;
+                   && this.maxMessagingVersion == ((Accept) other).maxMessagingVersion
+                   && this.crc32cAccepted == ((Accept) other).crc32cAccepted;
         }
 
         @Override
         public String toString()
         {
-            return String.format("Accept(use: %d, max: %d)", useMessagingVersion, maxMessagingVersion);
+            return String.format("Accept(use: %d, max: %d, crc32cAccepted: %b)", useMessagingVersion, maxMessagingVersion, crc32cAccepted);
         }
     }
 

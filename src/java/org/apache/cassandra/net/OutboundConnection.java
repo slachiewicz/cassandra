@@ -42,6 +42,7 @@ import org.apache.cassandra.io.util.DataOutputBufferFixed;
 import org.apache.cassandra.net.OutboundConnectionInitiator.Result.MessagingSuccess;
 import org.apache.cassandra.service.accord.debug.AccordRemoteTracing;
 import org.apache.cassandra.tracing.Tracing;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.Clock;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.JVMStabilityInspector;
@@ -224,14 +225,16 @@ public class OutboundConnection
         final Channel channel;
         final FrameEncoder.PayloadAllocator payloadAllocator;
         final OutboundConnectionSettings settings;
+        final ChecksumType payloadChecksum;
 
-        Established(int messagingVersion, Channel channel, FrameEncoder.PayloadAllocator payloadAllocator, OutboundConnectionSettings settings)
+        Established(int messagingVersion, Channel channel, FrameEncoder.PayloadAllocator payloadAllocator, OutboundConnectionSettings settings, ChecksumType payloadChecksum)
         {
             super(Kind.ESTABLISHED);
             this.messagingVersion = messagingVersion;
             this.channel = channel;
             this.payloadAllocator = payloadAllocator;
             this.settings = settings;
+            this.payloadChecksum = payloadChecksum;
         }
 
         boolean isConnected() { return channel.isOpen(); }
@@ -1143,7 +1146,7 @@ public class OutboundConnection
 
                         FrameEncoder.PayloadAllocator payloadAllocator = success.allocator;
                         Channel channel = success.channel;
-                        Established established = new Established(success.messagingVersion, channel, payloadAllocator, settings);
+                        Established established = new Established(success.messagingVersion, channel, payloadAllocator, settings, success.payloadChecksum);
                         state = established;
                         channel.pipeline().addLast("handleExceptionalStates", new ChannelInboundHandlerAdapter() {
                             @Override
@@ -1227,7 +1230,7 @@ public class OutboundConnection
                     messagingVersion = knownMessagingVersion;
                 }
 
-                settings = template.withSafeFraming();
+                settings = template;
                 if (messagingVersion > settings.acceptVersions.max)
                     messagingVersion = settings.acceptVersions.max;
 
@@ -1742,6 +1745,16 @@ public class OutboundConnection
     {
         State state = this.state;
         return state.isEstablished() ? state.established().settings : template;
+    }
+
+    /**
+     * Payload checksum negotiated for the current connection, or null if not connected or its frames carry none.
+     * See CASSANDRA-16360.
+     */
+    ChecksumType payloadChecksum()
+    {
+        State state = this.state;
+        return state.isEstablished() ? state.established().payloadChecksum : null;
     }
 
     @VisibleForTesting

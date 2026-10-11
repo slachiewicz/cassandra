@@ -31,12 +31,7 @@ import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Locator;
-import org.apache.cassandra.tcm.ClusterMetadata;
-import org.apache.cassandra.tcm.membership.NodeId;
-import org.apache.cassandra.tcm.membership.NodeVersion;
-import org.apache.cassandra.utils.CassandraVersion;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.StorageCompatibilityMode;
 
 import io.netty.channel.WriteBufferWaterMark;
 
@@ -61,18 +56,14 @@ public class OutboundConnectionSettings
         // uses our framing format with header crc24
         LZ4(1),
         // uses simple frames with separate header and payload crc
-        CRC(2),
-        // like CRC, but the payload checksum is CRC32C rather than CRC32; see CASSANDRA-16360
-        CRC32C(3);
+        CRC(2);
 
         /**
-         * Thrown by {@link #forId(int)} when a peer advertises a framing id this node doesn't
-         * recognize -- e.g. an older node connecting to (or accepting from) a node with
-         * {@code internode_checksum_type: crc32c} while itself predating CRC32C framing support, or a
-         * {@code storage_compatibility_mode}/{@code internode_checksum_type} mismatch across the
-         * cluster. Extends {@link IOException} so it flows through the same handshake-decode error
-         * handling as {@link org.apache.cassandra.utils.Crc.InvalidCrc} (clean channel close + a
-         * specific log message), rather than an unhandled {@link IllegalStateException}.
+         * Thrown by {@link #forId(int)} for a framing id this node doesn't recognize. Extends
+         * {@link IOException} so it flows through the normal handshake-decode error handling (clean
+         * channel close and a specific log message) rather than escaping as an
+         * {@link IllegalStateException}. Id 3 is unassigned; CRC32C payload checksums are negotiated
+         * separately in the handshake (CASSANDRA-16360), not as a framing.
          */
         public static class UnknownFramingException extends IOException
         {
@@ -80,10 +71,7 @@ public class OutboundConnectionSettings
 
             UnknownFramingException(int id)
             {
-                super("Unrecognized internode framing id " + id + " -- this usually means the peer is " +
-                      "using a checksum type or framing feature this node's version doesn't support; " +
-                      "check internode_checksum_type and storage_compatibility_mode are consistent " +
-                      "across the cluster");
+                super("Unrecognized internode framing id " + id);
                 this.id = id;
             }
         }
@@ -95,9 +83,14 @@ public class OutboundConnectionSettings
                 case 0: return UNPROTECTED;
                 case 1: return LZ4;
                 case 2: return CRC;
-                case 3: return CRC32C;
             }
             throw new UnknownFramingException(id);
+        }
+
+        /** Whether frames of this type carry a payload checksum that can be CRC32 or CRC32C. */
+        boolean hasPayloadChecksum()
+        {
+            return this == LZ4 || this == CRC;
         }
 
         final int id;
@@ -492,75 +485,8 @@ public class OutboundConnectionSettings
         if (category.isStreaming())
             return Framing.UNPROTECTED;
 
-        if (shouldCompressConnection(getBroadcastAddressAndPort(), to))
-            // CASSANDRA-16360: CRC32C is not offered for compressed connections -- Framing.id is a
-            // 2-bit wire field and 0-3 are all now spoken for (UNPROTECTED/LZ4/CRC/CRC32C); a 5th
-            // "LZ4+CRC32C" id would need to widen that encoding, which is riskier than it looks (an
-            // old peer reading an out-of-range id would silently misinterpret it, rather than
-            // cleanly reject it the way an old peer's Framing.forId(3) does today).
-            return Framing.LZ4;
-
-        return shouldUseCrc32c(to) ? Framing.CRC32C : Framing.CRC;
-    }
-
-    /**
-     * CASSANDRA-16360: the first release whose nodes can decode {@link Framing#CRC32C}. Must match the
-     * release that actually ships CRC32C framing; update it if that is later than 7.0.0.
-     */
-    @VisibleForTesting
-    static final CassandraVersion CRC32C_FRAMING_SINCE = new CassandraVersion("7.0").familyLowerBound.get();
-
-    /**
-     * CASSANDRA-16360: CRC32C internode framing is selected only when all of these hold:
-     * <ul>
-     *     <li>the operator opted in with {@code internode_checksum_type: crc32c};</li>
-     *     <li>{@code storage_compatibility_mode} is {@code NONE}, so {@code UPGRADING} or a
-     *     {@code CASSANDRA_N} mode switches it off cluster-wide;</li>
-     *     <li>cluster metadata records a release version for the peer, and that version can decode
-     *     framing id 3.</li>
-     * </ul>
-     * Framing is sent in the first handshake message, before the peer answers, so the peer's
-     * capability has to come from cluster metadata rather than from the handshake. A peer that is
-     * not registered yet, or whose version is unknown, gets CRC32.
-     */
-    @VisibleForTesting
-    static boolean shouldUseCrc32c(InetAddressAndPort peer)
-    {
-        return DatabaseDescriptor.internodeChecksumType() == Config.InternodeChecksumType.crc32c
-               && StorageCompatibilityMode.current() == StorageCompatibilityMode.NONE
-               && peerSupportsCrc32cFraming(peer);
-    }
-
-    private static boolean peerSupportsCrc32cFraming(InetAddressAndPort peer)
-    {
-        ClusterMetadata metadata = ClusterMetadata.currentNullable();
-        if (metadata == null)
-            return false;
-
-        NodeId id = metadata.directory.peerId(peer);
-        if (id == null)
-            return false;
-
-        NodeVersion version = metadata.directory.version(id);
-        return version != null && supportsCrc32cFraming(version.cassandraVersion);
-    }
-
-    @VisibleForTesting
-    static boolean supportsCrc32cFraming(CassandraVersion version)
-    {
-        return version != null && version.compareTo(CRC32C_FRAMING_SINCE) >= 0;
-    }
-
-    /**
-     * CASSANDRA-16360: the framing for the next connection attempt. A pool's framing is fixed when the
-     * pool is created, so a pool that chose CRC32C keeps it across reconnects. If the peer no longer
-     * qualifies (for example, its binary was downgraded under the same address), fall back to CRC32
-     * rather than failing every handshake until this node restarts. The opposite switch, from CRC32 to
-     * CRC32C, is never made on a live pool; it takes effect when this node restarts.
-     */
-    OutboundConnectionSettings withSafeFraming()
-    {
-        return framing == Framing.CRC32C && !shouldUseCrc32c(to) ? withFraming(Framing.CRC) : this;
+        return shouldCompressConnection(getBroadcastAddressAndPort(), to)
+               ? Framing.LZ4 : Framing.CRC;
     }
 
     // note that connectTo is updated even if specified, in the case of pre40 messaging and using encryption (to update port)

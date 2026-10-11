@@ -29,6 +29,7 @@ import com.google.common.annotations.VisibleForTesting;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.metrics.InternodeInboundMetrics;
 import org.apache.cassandra.net.Message.Header;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.Crc;
 
 import io.netty.channel.Channel;
@@ -67,10 +68,10 @@ public final class InboundMessageHandlers
     private final InternodeInboundMetrics metrics;
     private final MessageConsumer messageConsumer;
 
-    // Most recently decoded Framing for a connection from this peer; see CASSANDRA-16360.
-    // Volatile rather than synchronized: exposed only as a best-effort metrics gauge, and
-    // updated infrequently (once per new connection, not per-message).
-    private volatile OutboundConnectionSettings.Framing currentFraming;
+    // Payload checksum of the most recent connection from this peer, null if none yet or its frames carry
+    // none; see CASSANDRA-16360. Volatile rather than synchronized: exposed only as a best-effort metrics
+    // gauge, and updated once per new connection, not per message.
+    private volatile ChecksumType currentPayloadChecksum;
 
     private final HandlerProvider handlerProvider;
     private final Collection<InboundMessageHandler> handlers = new CopyOnWriteArrayList<>();
@@ -139,9 +140,9 @@ public final class InboundMessageHandlers
         metrics = new InternodeInboundMetrics(peer, this);
     }
 
-    InboundMessageHandler createHandler(FrameDecoder frameDecoder, OutboundConnectionSettings.Framing framing, ConnectionType type, Channel channel, int version)
+    InboundMessageHandler createHandler(FrameDecoder frameDecoder, ChecksumType payloadChecksum, ConnectionType type, Channel channel, int version)
     {
-        currentFraming = framing;
+        currentPayloadChecksum = payloadChecksum;
         InboundMessageHandler handler =
             handlerProvider.provide(frameDecoder,
 
@@ -170,11 +171,11 @@ public final class InboundMessageHandlers
         metrics.release();
     }
 
-    /** Framing decoded from the most recently established connection from this peer, or null if none yet. */
-    public String currentFramingName()
+    /** Payload checksum of the most recently established connection from this peer, or null. */
+    public String currentPayloadChecksumName()
     {
-        OutboundConnectionSettings.Framing framing = currentFraming;
-        return framing == null ? null : framing.name();
+        ChecksumType checksum = currentPayloadChecksum;
+        return checksum == null ? null : checksum.name();
     }
 
     private void onHandlerClosed(AbstractMessageHandler handler)

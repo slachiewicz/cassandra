@@ -23,7 +23,6 @@ import java.net.InetSocketAddress;
 import java.nio.channels.ClosedChannelException;
 import java.security.cert.Certificate;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -31,6 +30,8 @@ import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.config.Config;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.EncryptionOptions;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.OutboundConnectionInitiator.Result.MessagingSuccess;
@@ -39,7 +40,6 @@ import org.apache.cassandra.security.ISslContextFactory;
 import org.apache.cassandra.security.SSLFactory;
 import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.JVMStabilityInspector;
-import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.concurrent.AsyncPromise;
 import org.apache.cassandra.utils.concurrent.ImmediateFuture;
 import org.apache.cassandra.utils.memory.BufferPools;
@@ -310,6 +310,9 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
 
     private class Handler extends ByteToMessageDecoder
     {
+        // CASSANDRA-16360: whether our Initiate asked the peer for CRC32C payload checksums
+        private boolean requestedCrc32c;
+
         /**
          * {@inheritDoc}
          *
@@ -320,7 +323,10 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
         @Override
         public void channelActive(final ChannelHandlerContext ctx) throws Exception
         {
-            Initiate msg = new Initiate(settings.acceptVersions, type, settings.framing, settings.from);
+            requestedCrc32c = type.isMessaging()
+                              && settings.framing.hasPayloadChecksum()
+                              && DatabaseDescriptor.internodeChecksumType() == Config.InternodeChecksumType.crc32c;
+            Initiate msg = new Initiate(settings.acceptVersions, type, settings.framing, requestedCrc32c, settings.from);
             logger.trace("starting handshake with peer {}, msg = {}", settings.connectToId(), msg);
 
             AsyncChannelPromise.writeAndFlush(ctx, msg.encode(),
@@ -333,19 +339,6 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
         public void channelInactive(ChannelHandlerContext ctx) throws Exception
         {
             super.channelInactive(ctx);
-            // CASSANDRA-16360: a peer without CRC32C framing support cannot decode the framing id we
-            // just sent in Initiate; its Framing.forId fails and it closes the channel, which we
-            // observe here only as a generic mid-handshake close. There is no way to distinguish that
-            // from a network blip on this side, so when CRC32C was requested, log an actionable hint.
-            // CRC32C is only sent to peers that cluster metadata records at a release that decodes it,
-            // so the likely cause is metadata lagging a peer's binary downgrade.
-            if (settings.framing == OutboundConnectionSettings.Framing.CRC32C)
-                NoSpamLogger.log(logger, NoSpamLogger.Level.WARN, 1, TimeUnit.MINUTES,
-                                 "Peer {} closed the connection during handshake while CRC32C internode framing was requested. " +
-                                 "If this recurs, the peer may be running a release without CRC32C framing support that cluster " +
-                                 "metadata does not yet reflect (for example, just after a downgrade); reconnects fall back to CRC32 " +
-                                 "once it does. To stop sending CRC32C now, set internode_checksum_type: crc32 on this node and restart it.",
-                                 settings.connectToId());
             resultPromise.tryFailure(new ClosedChannelException());
         }
 
@@ -385,23 +378,24 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
                     // This is a bit ugly
                     if (type.isMessaging())
                     {
+                        // CASSANDRA-16360: CRC32C only if we asked and the peer agreed; a peer that
+                        // predates the request bit ignores it and never sets the reply bit
+                        ChecksumType payloadChecksum = requestedCrc32c && msg.crc32cAccepted ? ChecksumType.CRC32C : ChecksumType.CRC32;
                         switch (settings.framing)
                         {
                             case LZ4:
-                                frameEncoder = FrameEncoderLZ4.getInstance(ChecksumType.CRC32);
+                                frameEncoder = FrameEncoderLZ4.getInstance(payloadChecksum);
                                 break;
                             case CRC:
-                                frameEncoder = FrameEncoderCrc.getInstance(ChecksumType.CRC32);
-                                break;
-                            case CRC32C:
-                                frameEncoder = FrameEncoderCrc.getInstance(ChecksumType.CRC32C);
+                                frameEncoder = FrameEncoderCrc.getInstance(payloadChecksum);
                                 break;
                             case UNPROTECTED:
                                 frameEncoder = FrameEncoderUnprotected.instance;
+                                payloadChecksum = null;
                                 break;
                         }
 
-                        result = (Result<SuccessType>) messagingSuccess(ctx.channel(), useMessagingVersion, frameEncoder.allocator());
+                        result = (Result<SuccessType>) messagingSuccess(ctx.channel(), useMessagingVersion, frameEncoder.allocator(), payloadChecksum);
                     }
                     else
                     {
@@ -510,10 +504,13 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
         public static class MessagingSuccess extends Success<MessagingSuccess>
         {
             public final FrameEncoder.PayloadAllocator allocator;
-            MessagingSuccess(Channel channel, int messagingVersion, FrameEncoder.PayloadAllocator allocator)
+            /** Payload checksum of the frames on this connection, or null if they have none (CASSANDRA-16360) */
+            public final ChecksumType payloadChecksum;
+            MessagingSuccess(Channel channel, int messagingVersion, FrameEncoder.PayloadAllocator allocator, ChecksumType payloadChecksum)
             {
                 super(channel, messagingVersion);
                 this.allocator = allocator;
+                this.payloadChecksum = payloadChecksum;
             }
         }
 
@@ -548,7 +545,7 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
 
         boolean isSuccess() { return outcome == Outcome.SUCCESS; }
         public SuccessType success() { return (SuccessType) this; }
-        static MessagingSuccess messagingSuccess(Channel channel, int messagingVersion, FrameEncoder.PayloadAllocator allocator) { return new MessagingSuccess(channel, messagingVersion, allocator); }
+        static MessagingSuccess messagingSuccess(Channel channel, int messagingVersion, FrameEncoder.PayloadAllocator allocator, ChecksumType payloadChecksum) { return new MessagingSuccess(channel, messagingVersion, allocator, payloadChecksum); }
         static StreamingSuccess streamingSuccess(Channel channel, int messagingVersion) { return new StreamingSuccess(channel, messagingVersion); }
 
         public Retry retry() { return (Retry) this; }

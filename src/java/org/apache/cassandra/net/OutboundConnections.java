@@ -33,6 +33,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.metrics.InternodeOutboundMetrics;
+import org.apache.cassandra.utils.ChecksumType;
 import org.apache.cassandra.utils.NoSpamLogger;
 import org.apache.cassandra.utils.concurrent.Condition;
 import org.apache.cassandra.utils.concurrent.FutureCombiner;
@@ -275,13 +276,13 @@ public class OutboundConnections
     }
 
     /**
-     * Framing used by the small-messages connection to this peer: the established connection's, or the
-     * one the next connection attempt will use. Small, large and urgent connections always resolve to
-     * the same framing. See CASSANDRA-16360.
+     * Payload checksum negotiated by the small-messages connection to this peer, or null if it is not
+     * connected or its frames carry none. Small, large and urgent connections make the same request, and
+     * the peer answers each the same way. See CASSANDRA-16360.
      */
-    public OutboundConnectionSettings.Framing framing()
+    public ChecksumType payloadChecksum()
     {
-        return small.settings().withSafeFraming().framing;
+        return small.payloadChecksum();
     }
 
     private static class UnusedConnectionMonitor

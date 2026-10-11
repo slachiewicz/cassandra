@@ -21,12 +21,12 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Collection;
 import java.util.zip.CRC32;
-import java.util.zip.Checksum;
 
 import org.apache.cassandra.utils.ChecksumType;
 
 import io.netty.channel.ChannelPipeline;
 
+import static org.apache.cassandra.utils.Crc.computeCrc32c;
 import static org.apache.cassandra.utils.Crc.crc24;
 import static org.apache.cassandra.utils.Crc.crc32;
 import static org.apache.cassandra.utils.Crc.updateCrc32;
@@ -60,9 +60,8 @@ import static org.apache.cassandra.utils.Crc.updateCrc32;
  */
 public final class FrameDecoderCrc extends FrameDecoderWith8bHeader
 {
-    // CASSANDRA-16360: payload checksum algorithm, selected per-connection by
-    // OutboundConnectionSettings#framing (gated on internode_checksum_type + StorageCompatibilityMode,
-    // see crc32c-plan.md §4.1b). The frame header CRC24 is unaffected by this and is not migrated.
+    // CASSANDRA-16360: payload checksum algorithm, negotiated per connection in the handshake
+    // (see HandshakeProtocol.Initiate). The frame header CRC24 is unaffected and is not migrated.
     private final ChecksumType checksumType;
 
     public FrameDecoderCrc(BufferPoolAllocator allocator)
@@ -179,15 +178,7 @@ public final class FrameDecoderCrc extends FrameDecoderWith8bHeader
             return crc.getValue();
         }
 
-        Checksum crc = checksumType.newInstance();
-        int savePosition = in.position();
-        int saveLimit = in.limit();
-        in.limit(end);
-        in.position(start);
-        crc.update(in);
-        in.limit(saveLimit);
-        in.position(savePosition);
-        return crc.getValue();
+        return computeCrc32c(in, start, end) & 0xFFFFFFFFL;
     }
 
     void decode(Collection<Frame> into, ShareableBytes bytes)

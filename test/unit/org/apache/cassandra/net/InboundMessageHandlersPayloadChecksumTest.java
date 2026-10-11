@@ -32,17 +32,16 @@ import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.metrics.CassandraMetricsRegistry;
 import org.apache.cassandra.metrics.DefaultNameFactory;
 import org.apache.cassandra.metrics.InternodeInboundMetrics;
+import org.apache.cassandra.utils.ChecksumType;
 
 import static org.apache.cassandra.net.OutboundConnectionsTest.LOCAL_ADDR;
 import static org.apache.cassandra.net.OutboundConnectionsTest.REMOTE_ADDR;
 
 /**
- * CASSANDRA-16360: the {@link OutboundConnectionSettings.Framing} actually being decoded from a peer's inbound
- * connection must be observable per-peer, distinct from (and comparable against) the outbound gauge, so a
- * mismatch between "what I sent" and "what arrived" is directly visible rather than only inferable from an
- * {@link OutboundConnectionSettings.Framing.UnknownFramingException} log line. See crc32c-plan.md §4.6a.
+ * CASSANDRA-16360: the payload checksum negotiated by a peer's inbound connection must be observable per peer,
+ * so operators and the mixed-version tests described in crc32c-plan.md §4.4 can see whether CRC32C is in use.
  */
-public class InboundMessageHandlersFramingTest
+public class InboundMessageHandlersPayloadChecksumTest
 {
     private InboundMessageHandlers handlers;
 
@@ -81,7 +80,7 @@ public class InboundMessageHandlersFramingTest
             public void fail(Message.Header header, Throwable failure) {}
         };
 
-        // handlerProvider is never exercised by these tests: createHandler() records the decoded Framing
+        // handlerProvider is never exercised by these tests: createHandler() records the payload checksum
         // *before* delegating to it, so a stub that returns null is sufficient and avoids needing a real
         // Channel/FrameDecoder.
         InboundMessageHandlers.HandlerProvider stubProvider =
@@ -94,31 +93,31 @@ public class InboundMessageHandlersFramingTest
     }
 
     @SuppressWarnings("unchecked")
-    private static String readFramingGauge(InetAddressAndPort peer)
+    private static String readPayloadChecksumGauge(InetAddressAndPort peer)
     {
         String metricName = new DefaultNameFactory(InternodeInboundMetrics.TYPE_NAME, peer.getHostAddressAndPortForJMX())
-                             .createMetricName("Framing")
+                             .createMetricName("PayloadChecksum")
                              .getMetricName();
         Gauge<String> gauge = (Gauge<String>) CassandraMetricsRegistry.Metrics.getMetrics().get(metricName);
-        Assert.assertNotNull("Framing gauge not registered for " + peer, gauge);
+        Assert.assertNotNull("PayloadChecksum gauge not registered for " + peer, gauge);
         return gauge.getValue();
     }
 
     @Test
-    public void noConnectionYet_currentFramingNameIsNull()
+    public void noConnectionYet_currentPayloadChecksumIsNull()
     {
         handlers = newHandlers();
-        Assert.assertNull(handlers.currentFramingName());
+        Assert.assertNull(handlers.currentPayloadChecksumName());
     }
 
     @Test
-    public void createHandler_recordsDecodedFraming()
+    public void createHandler_recordsNegotiatedChecksum()
     {
         handlers = newHandlers();
 
-        handlers.createHandler(null, OutboundConnectionSettings.Framing.CRC32C, ConnectionType.SMALL_MESSAGES, null, MessagingService.current_version);
-        Assert.assertEquals("CRC32C", handlers.currentFramingName());
-        Assert.assertEquals("CRC32C", readFramingGauge(REMOTE_ADDR));
+        handlers.createHandler(null, ChecksumType.CRC32C, ConnectionType.SMALL_MESSAGES, null, MessagingService.current_version);
+        Assert.assertEquals("CRC32C", handlers.currentPayloadChecksumName());
+        Assert.assertEquals("CRC32C", readPayloadChecksumGauge(REMOTE_ADDR));
     }
 
     @Test
@@ -126,28 +125,28 @@ public class InboundMessageHandlersFramingTest
     {
         handlers = newHandlers();
 
-        handlers.createHandler(null, OutboundConnectionSettings.Framing.CRC, ConnectionType.SMALL_MESSAGES, null, MessagingService.current_version);
-        Assert.assertEquals("CRC", handlers.currentFramingName());
-        Assert.assertEquals("CRC", readFramingGauge(REMOTE_ADDR));
+        handlers.createHandler(null, ChecksumType.CRC32, ConnectionType.SMALL_MESSAGES, null, MessagingService.current_version);
+        Assert.assertEquals("CRC32", handlers.currentPayloadChecksumName());
+        Assert.assertEquals("CRC32", readPayloadChecksumGauge(REMOTE_ADDR));
 
-        // simulate a reconnect that negotiates a different framing (e.g. after a config/compatibility-mode change)
-        handlers.createHandler(null, OutboundConnectionSettings.Framing.CRC32C, ConnectionType.SMALL_MESSAGES, null, MessagingService.current_version);
-        Assert.assertEquals("CRC32C", handlers.currentFramingName());
-        Assert.assertEquals("CRC32C", readFramingGauge(REMOTE_ADDR));
+        // simulate a reconnect that negotiates a different checksum (e.g. after the peer was upgraded)
+        handlers.createHandler(null, ChecksumType.CRC32C, ConnectionType.SMALL_MESSAGES, null, MessagingService.current_version);
+        Assert.assertEquals("CRC32C", handlers.currentPayloadChecksumName());
+        Assert.assertEquals("CRC32C", readPayloadChecksumGauge(REMOTE_ADDR));
     }
 
     @Test
-    public void framingGauge_removedOnRelease()
+    public void payloadChecksumGauge_removedOnRelease()
     {
         handlers = newHandlers();
-        handlers.createHandler(null, OutboundConnectionSettings.Framing.CRC32C, ConnectionType.SMALL_MESSAGES, null, MessagingService.current_version);
-        Assert.assertNotNull(readFramingGauge(REMOTE_ADDR));
+        handlers.createHandler(null, ChecksumType.CRC32C, ConnectionType.SMALL_MESSAGES, null, MessagingService.current_version);
+        Assert.assertNotNull(readPayloadChecksumGauge(REMOTE_ADDR));
 
         handlers.releaseMetrics();
         handlers = null; // already released, don't release again in teardown
 
         String metricName = new DefaultNameFactory(InternodeInboundMetrics.TYPE_NAME, REMOTE_ADDR.getHostAddressAndPortForJMX())
-                             .createMetricName("Framing")
+                             .createMetricName("PayloadChecksum")
                              .getMetricName();
         Assert.assertNull(CassandraMetricsRegistry.Metrics.getMetrics().get(metricName));
     }

@@ -22,6 +22,7 @@ import com.codahale.metrics.Meter;
 
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.net.OutboundConnections;
+import org.apache.cassandra.utils.ChecksumType;
 
 import static org.apache.cassandra.metrics.CassandraMetricsRegistry.Metrics;
 
@@ -106,8 +107,8 @@ public class InternodeOutboundMetrics
     public final Gauge<Long> urgentMessageDroppedTasksDueToError;
     /** Dropped bytes because of error for urgent message TCP Connections */
     public final Gauge<Long> urgentMessageDroppedBytesDueToError;
-    /** Framing (checksum type) used by messaging connections to this peer; see CASSANDRA-16360 */
-    public final Gauge<String> framing;
+    /** Payload checksum negotiated by messaging connections to this peer, or null if not connected; see CASSANDRA-16360 */
+    public final Gauge<String> payloadChecksum;
 
     private final MetricNameFactory factory;
 
@@ -157,8 +158,8 @@ public class InternodeOutboundMetrics
         urgentMessageDroppedTasksDueToError = Metrics.register(factory.createMetricName("UrgentMessageDroppedTasksDueToError"), messagingPool.urgent::errorCount);
         urgentMessageDroppedBytesDueToError = Metrics.register(factory.createMetricName("UrgentMessageDroppedBytesDueToError"), messagingPool.urgent::errorBytes);
         expiredCallbacks = Metrics.meter(factory.createMetricName("Timeouts"));
-        framing = Metrics.register(factory.createMetricName("Framing"),
-                                    () -> messagingPool.framing().name());
+        payloadChecksum = Metrics.register(factory.createMetricName("PayloadChecksum"),
+                                           () -> { ChecksumType type = messagingPool.payloadChecksum(); return type == null ? null : type.name(); });
 
         // deprecated
         Metrics.register(factory.createMetricName("GossipMessagePendingTasks"), (Gauge<Integer>) messagingPool.urgent::pendingCount);
@@ -205,6 +206,6 @@ public class InternodeOutboundMetrics
         Metrics.remove(factory.createMetricName("UrgentMessageDroppedTasksDueToError"));
         Metrics.remove(factory.createMetricName("UrgentMessageDroppedBytesDueToError"));
         Metrics.remove(factory.createMetricName("Timeouts"));
-        Metrics.remove(factory.createMetricName("Framing"));
+        Metrics.remove(factory.createMetricName("PayloadChecksum"));
     }
 }

@@ -530,10 +530,9 @@ public class Config
     public InternodeCompression internode_compression = InternodeCompression.none;
 
     /**
-     * CASSANDRA-16360: which checksum algorithm to request for internode CRC-framed connections.
-     * {@code crc32c} is only used when {@link StorageCompatibilityMode#current()} is
-     * {@link StorageCompatibilityMode#NONE} and cluster metadata records the peer at a release that
-     * decodes CRC32C framing; see OutboundConnectionSettings#framing(ConnectionCategory). Defaults to
+     * CASSANDRA-16360: the payload checksum this node requests for the internode messaging connections it
+     * opens. With {@code crc32c}, each connection asks the peer in the handshake and uses CRC32C only if the
+     * peer agrees; peers on older releases ignore the request and the connection keeps CRC32. Defaults to
      * {@code crc32}: CRC32C only measured faster on CPUs with slow {@code pclmulqdq}; see
      * doc/modules/cassandra/pages/architecture/crc32c-plan.md Phase 0.
      */

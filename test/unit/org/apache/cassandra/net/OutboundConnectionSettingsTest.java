@@ -31,9 +31,6 @@ import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.distributed.test.log.ClusterMetadataTestHelper;
 import org.apache.cassandra.tcm.ClusterMetadataService;
 import org.apache.cassandra.tcm.StubClusterMetadataService;
-import org.apache.cassandra.tcm.membership.NodeVersion;
-import org.apache.cassandra.utils.CassandraVersion;
-import org.apache.cassandra.utils.StorageCompatibilityMode;
 
 import static org.apache.cassandra.net.OutboundConnectionsTest.LOCAL_ADDR;
 import static org.apache.cassandra.net.OutboundConnectionsTest.REMOTE_ADDR;
@@ -136,102 +133,4 @@ public class OutboundConnectionSettingsTest
         Assert.assertFalse(OutboundConnectionSettings.shouldCompressConnection(LOCAL_ADDR, REMOTE_ADDR));
     }
 
-    // CASSANDRA-16360: with the peer registered at a version that can decode CRC32C framing,
-    // Framing.CRC32C is chosen only for (crc32c, NONE); every other combination of
-    // internode_checksum_type x storage_compatibility_mode falls back to plain CRC.
-    @Test
-    public void framing_Crc32cOnlyWhenOptedInAndCompatibilityModeNone()
-    {
-        ClusterMetadataTestHelper.register(REMOTE_ADDR, DC1, RACK);
-        withChecksumSettings(() -> {
-            assertFraming(Config.InternodeChecksumType.crc32, StorageCompatibilityMode.NONE, OutboundConnectionSettings.Framing.CRC);
-            assertFraming(Config.InternodeChecksumType.crc32, StorageCompatibilityMode.UPGRADING, OutboundConnectionSettings.Framing.CRC);
-            assertFraming(Config.InternodeChecksumType.crc32c, StorageCompatibilityMode.NONE, OutboundConnectionSettings.Framing.CRC32C);
-            assertFraming(Config.InternodeChecksumType.crc32c, StorageCompatibilityMode.UPGRADING, OutboundConnectionSettings.Framing.CRC);
-            assertFraming(Config.InternodeChecksumType.crc32c, StorageCompatibilityMode.CASSANDRA_5, OutboundConnectionSettings.Framing.CRC);
-        });
-    }
-
-    // CASSANDRA-16360: storage_compatibility_mode NONE is the default and says nothing about minor
-    // versions, so the peer's own release version decides. A 6.0 peer cannot decode framing id 3.
-    @Test
-    public void framing_Crc32cNotOfferedToPeerOnOlderRelease()
-    {
-        ClusterMetadataTestHelper.register(REMOTE_ADDR, DC1, RACK, NodeVersion.fromCassandraVersion(new CassandraVersion("6.0.1")));
-        withChecksumSettings(() -> assertFraming(Config.InternodeChecksumType.crc32c, StorageCompatibilityMode.NONE, OutboundConnectionSettings.Framing.CRC));
-    }
-
-    @Test
-    public void framing_Crc32cNotOfferedToUnregisteredPeer()
-    {
-        withChecksumSettings(() -> assertFraming(Config.InternodeChecksumType.crc32c, StorageCompatibilityMode.NONE, OutboundConnectionSettings.Framing.CRC));
-    }
-
-    @Test
-    public void supportsCrc32cFraming_ByReleaseVersion()
-    {
-        Assert.assertFalse(OutboundConnectionSettings.supportsCrc32cFraming(null));
-        Assert.assertFalse(OutboundConnectionSettings.supportsCrc32cFraming(new CassandraVersion("5.0.5")));
-        Assert.assertFalse(OutboundConnectionSettings.supportsCrc32cFraming(new CassandraVersion("6.0.0")));
-        Assert.assertFalse(OutboundConnectionSettings.supportsCrc32cFraming(new CassandraVersion("6.1.3")));
-        Assert.assertTrue(OutboundConnectionSettings.supportsCrc32cFraming(new CassandraVersion("7.0-alpha1")));
-        Assert.assertTrue(OutboundConnectionSettings.supportsCrc32cFraming(new CassandraVersion("7.0-SNAPSHOT")));
-        Assert.assertTrue(OutboundConnectionSettings.supportsCrc32cFraming(new CassandraVersion("7.0.0")));
-        Assert.assertTrue(OutboundConnectionSettings.supportsCrc32cFraming(new CassandraVersion("8.0.0")));
-    }
-
-    // CASSANDRA-16360: a pool that chose CRC32C keeps that framing for its lifetime. If the peer later
-    // stops qualifying (binary downgraded under the same address), reconnect attempts must fall back to
-    // CRC rather than send framing id 3 to a node that rejects it on every handshake.
-    @Test
-    public void withSafeFraming_FallsBackWhenPeerNoLongerQualifies()
-    {
-        ClusterMetadataTestHelper.register(REMOTE_ADDR, DC1, RACK, NodeVersion.fromCassandraVersion(new CassandraVersion("6.0.1")));
-        withChecksumSettings(() -> {
-            DatabaseDescriptor.setInternodeChecksumType(Config.InternodeChecksumType.crc32c);
-            DatabaseDescriptor.setStorageCompatibilityMode(StorageCompatibilityMode.NONE);
-            OutboundConnectionSettings settings = new OutboundConnectionSettings(REMOTE_ADDR).withFraming(OutboundConnectionSettings.Framing.CRC32C);
-            Assert.assertEquals(OutboundConnectionSettings.Framing.CRC, settings.withSafeFraming().framing);
-
-            OutboundConnectionSettings crc = new OutboundConnectionSettings(REMOTE_ADDR).withFraming(OutboundConnectionSettings.Framing.CRC);
-            Assert.assertSame(crc, crc.withSafeFraming());
-        });
-    }
-
-    @Test
-    public void withSafeFraming_KeepsCrc32cWhilePeerQualifies()
-    {
-        ClusterMetadataTestHelper.register(REMOTE_ADDR, DC1, RACK);
-        withChecksumSettings(() -> {
-            DatabaseDescriptor.setInternodeChecksumType(Config.InternodeChecksumType.crc32c);
-            DatabaseDescriptor.setStorageCompatibilityMode(StorageCompatibilityMode.NONE);
-            OutboundConnectionSettings settings = new OutboundConnectionSettings(REMOTE_ADDR).withFraming(OutboundConnectionSettings.Framing.CRC32C);
-            Assert.assertSame(settings, settings.withSafeFraming());
-        });
-    }
-
-    private static void withChecksumSettings(Runnable test)
-    {
-        DatabaseDescriptor.setInternodeCompression(Config.InternodeCompression.none);
-        StorageCompatibilityMode originalMode = DatabaseDescriptor.getStorageCompatibilityMode();
-        Config.InternodeChecksumType originalChecksumType = DatabaseDescriptor.internodeChecksumType();
-        try
-        {
-            test.run();
-        }
-        finally
-        {
-            DatabaseDescriptor.setStorageCompatibilityMode(originalMode);
-            DatabaseDescriptor.setInternodeChecksumType(originalChecksumType);
-        }
-    }
-
-    private static void assertFraming(Config.InternodeChecksumType checksumType, StorageCompatibilityMode mode, OutboundConnectionSettings.Framing expected)
-    {
-        DatabaseDescriptor.setInternodeChecksumType(checksumType);
-        DatabaseDescriptor.setStorageCompatibilityMode(mode);
-        OutboundConnectionSettings settings = new OutboundConnectionSettings(REMOTE_ADDR);
-        Assert.assertEquals("checksumType=" + checksumType + " mode=" + mode,
-                            expected, settings.framing(ConnectionCategory.MESSAGING));
-    }
 }

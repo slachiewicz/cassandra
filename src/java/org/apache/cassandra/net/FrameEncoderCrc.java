@@ -20,13 +20,13 @@ package org.apache.cassandra.net;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.zip.CRC32;
-import java.util.zip.Checksum;
 
 import org.apache.cassandra.utils.ChecksumType;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandler;
 
+import static org.apache.cassandra.utils.Crc.computeCrc32c;
 import static org.apache.cassandra.utils.Crc.crc24;
 import static org.apache.cassandra.utils.Crc.crc32;
 
@@ -151,8 +151,6 @@ public class FrameEncoderCrc extends FrameEncoder
             return crc.getValue();
         }
 
-        Checksum crc = checksumType.newInstance();
-        crc.update(payload);
-        return crc.getValue();
+        return computeCrc32c(payload, payload.position(), payload.limit()) & 0xFFFFFFFFL;
     }
 }

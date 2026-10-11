@@ -31,6 +31,7 @@ import org.apache.cassandra.utils.ChecksumType;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandler;
 
+import static org.apache.cassandra.utils.Crc.computeCrc32c;
 import static org.apache.cassandra.utils.Crc.crc24;
 import static org.apache.cassandra.utils.Crc.crc32;
 
@@ -41,28 +42,31 @@ import static org.apache.cassandra.utils.Crc.crc32;
 public
 class FrameEncoderLZ4 extends FrameEncoder
 {
-    public static final FrameEncoderLZ4 fastInstance = new FrameEncoderLZ4(LZ4Factory.fastestInstance().fastCompressor());
+    public static final FrameEncoderLZ4 fastInstance = new FrameEncoderLZ4(LZ4Factory.fastestInstance().fastCompressor(), ChecksumType.CRC32);
+    // CASSANDRA-16360: CRC32C payload checksums, used once both peers negotiate them in the handshake
+    private static final FrameEncoderLZ4 fastCrc32cInstance = new FrameEncoderLZ4(LZ4Factory.fastestInstance().fastCompressor(), ChecksumType.CRC32C);
 
     private final LZ4Compressor compressor;
+    private final ChecksumType checksumType;
 
-    private FrameEncoderLZ4(LZ4Compressor compressor)
+    private FrameEncoderLZ4(LZ4Compressor compressor, ChecksumType checksumType)
     {
         this.compressor = compressor;
+        this.checksumType = checksumType;
     }
 
     /**
-     * CASSANDRA-16360 Phase 1 plumbing: see FrameEncoderCrc#getInstance for rationale. Only CRC32 is
-     * implemented today.
+     * CASSANDRA-16360: the encoder for the given payload checksum. {@link #fastInstance} stays the CRC32
+     * encoder that the native protocol and every prior release use.
      */
     public static FrameEncoderLZ4 getInstance(ChecksumType checksumType)
     {
-        if (checksumType != ChecksumType.CRC32)
-            // CASSANDRA-16360: not a "not yet" TODO -- Framing.id is a 2-bit wire field with no room
-            // for a distinct "LZ4+CRC32C" id alongside UNPROTECTED/LZ4/CRC/CRC32C; see
-            // OutboundConnectionSettings#framing and crc32c-plan.md §4.1b. Compressed connections keep
-            // CRC32 for their payload checksum indefinitely, or until a future id-space-widening effort.
-            throw new UnsupportedOperationException(checksumType + " frame payload checksums are not implemented for LZ4 framing");
-        return fastInstance;
+        switch (checksumType)
+        {
+            case CRC32:  return fastInstance;
+            case CRC32C: return fastCrc32cInstance;
+            default:     throw new UnsupportedOperationException(checksumType + " frame payload checksums are not implemented");
+        }
     }
 
     private static final int HEADER_LENGTH = 8;
@@ -106,12 +110,21 @@ class FrameEncoderLZ4 extends FrameEncoder
 
             writeHeader(frame, isSelfContained, compressedLength, uncompressedLength);
 
-            CRC32 crc = crc32();
             frame.position(HEADER_LENGTH);
             frame.limit(compressedLength + HEADER_LENGTH);
-            crc.update(frame);
+            int frameCrc;
+            if (checksumType == ChecksumType.CRC32)
+            {
+                CRC32 crc = crc32();
+                crc.update(frame);
+                frameCrc = (int) crc.getValue();
+            }
+            else
+            {
+                frameCrc = computeCrc32c(frame, HEADER_LENGTH, compressedLength + HEADER_LENGTH);
+                frame.position(compressedLength + HEADER_LENGTH);
+            }
 
-            int frameCrc = (int) crc.getValue();
             if (frame.order() == ByteOrder.BIG_ENDIAN)
                 frameCrc = Integer.reverseBytes(frameCrc);
             int frameLength = compressedLength + HEADER_AND_TRAILER_LENGTH;
