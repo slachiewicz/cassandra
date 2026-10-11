@@ -2016,16 +2016,15 @@ internode_compression: dc
 #   the traditional CRC-32 (IEEE 802.3) algorithm.
 #
 # crc32c
-#   the Castagnoli CRC-32C algorithm, JIT-intrinsified on x86_64 (SSE4.2) and
-#   some ARM64 CPUs. NOTE: crc32c is only actually used when
-#   storage_compatibility_mode is NONE (i.e. every node in the cluster has
-#   been confirmed upgraded to a version that understands it) -- on any
-#   other storage_compatibility_mode this setting is ignored and crc32 is
-#   used, to avoid sending an old peer a framing byte it can't decode.
-#   Benchmark this on your own hardware/JDK before enabling: CRC32C is not a
-#   universal win (see doc/modules/cassandra/pages/architecture/crc32c-plan.md
-#   Phase 0 -- 6-8x faster on SSE4.2-era x86_64, but no measurable benefit on
-#   CPUs with a vectorized CRC32 path, e.g. AMD Zen 3 or Apple Silicon).
+#   the Castagnoli CRC-32C algorithm. Used only on uncompressed connections,
+#   only when storage_compatibility_mode is NONE, and only to peers that
+#   cluster metadata records at a release that understands CRC32C framing;
+#   every other connection keeps crc32, so this is safe to set during a
+#   rolling upgrade. Takes effect for connections created after a restart.
+#   Benchmark on your own hardware before enabling: CRC32C was much faster
+#   only on older x86_64 CPUs (Sandy Bridge, Ivy Bridge), and no faster on
+#   AMD Zen 3 or Apple M1 (see
+#   doc/modules/cassandra/pages/architecture/crc32c-plan.md, Phase 0).
 internode_checksum_type: crc32
 
 # Enable or disable tcp_nodelay for inter-dc communication.

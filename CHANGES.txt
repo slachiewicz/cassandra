@@ -1,5 +1,5 @@
 7.0
- * Add opt-in CRC32C internode frame checksums via internode_checksum_type, gated on storage_compatibility_mode NONE (CASSANDRA-16360)
+ * Add opt-in CRC32C internode frame checksums via internode_checksum_type, sent only to peers on a release that supports them (CASSANDRA-16360)
  * Extract reusable HttpService from cloud metadata connector (CASSANDRA-21195)
  * Redact hash and _hash suffixed parameters in system_views.settings (CASSANDRA-21686)
  * Allow CQLSSTableWriter to specify SSTable id generator to use (CASSANDRA-21012)

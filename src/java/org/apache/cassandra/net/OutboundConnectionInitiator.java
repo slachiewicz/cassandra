@@ -336,14 +336,15 @@ public class OutboundConnectionInitiator<SuccessType extends OutboundConnectionI
             // CASSANDRA-16360: a peer without CRC32C framing support cannot decode the framing id we
             // just sent in Initiate; its Framing.forId fails and it closes the channel, which we
             // observe here only as a generic mid-handshake close. There is no way to distinguish that
-            // from a network blip on this side, so when CRC32C was requested, log an actionable hint
-            // (the misconfigured side -- this one -- is the only side that can fix it).
+            // from a network blip on this side, so when CRC32C was requested, log an actionable hint.
+            // CRC32C is only sent to peers that cluster metadata records at a release that decodes it,
+            // so the likely cause is metadata lagging a peer's binary downgrade.
             if (settings.framing == OutboundConnectionSettings.Framing.CRC32C)
                 NoSpamLogger.log(logger, NoSpamLogger.Level.WARN, 1, TimeUnit.MINUTES,
                                  "Peer {} closed the connection during handshake while CRC32C internode framing was requested. " +
-                                 "If this recurs, the peer may be running a version without CRC32C support, or have a mismatched " +
-                                 "internode_checksum_type/storage_compatibility_mode; set internode_checksum_type: crc32 (or " +
-                                 "storage_compatibility_mode: UPGRADING) on this node until every node in the cluster supports CRC32C framing.",
+                                 "If this recurs, the peer may be running a release without CRC32C framing support that cluster " +
+                                 "metadata does not yet reflect (for example, just after a downgrade); reconnects fall back to CRC32 " +
+                                 "once it does. To stop sending CRC32C now, set internode_checksum_type: crc32 on this node and restart it.",
                                  settings.connectToId());
             resultPromise.tryFailure(new ClosedChannelException());
         }

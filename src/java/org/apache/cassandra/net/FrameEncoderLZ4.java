@@ -59,7 +59,7 @@ class FrameEncoderLZ4 extends FrameEncoder
         if (checksumType != ChecksumType.CRC32)
             // CASSANDRA-16360: not a "not yet" TODO -- Framing.id is a 2-bit wire field with no room
             // for a distinct "LZ4+CRC32C" id alongside UNPROTECTED/LZ4/CRC/CRC32C; see
-            // OutboundConnectionSettings#framing and crc32c-plan.md §4.2. Compressed connections keep
+            // OutboundConnectionSettings#framing and crc32c-plan.md §4.1b. Compressed connections keep
             // CRC32 for their payload checksum indefinitely, or until a future id-space-widening effort.
             throw new UnsupportedOperationException(checksumType + " frame payload checksums are not implemented for LZ4 framing");
         return fastInstance;

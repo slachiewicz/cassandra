@@ -274,6 +274,16 @@ public class OutboundConnections
         return template;
     }
 
+    /**
+     * Framing used by the small-messages connection to this peer: the established connection's, or the
+     * one the next connection attempt will use. Small, large and urgent connections always resolve to
+     * the same framing. See CASSANDRA-16360.
+     */
+    public OutboundConnectionSettings.Framing framing()
+    {
+        return small.settings().withSafeFraming().framing;
+    }
+
     private static class UnusedConnectionMonitor
     {
         UnusedConnectionMonitor(MessagingService messagingService)

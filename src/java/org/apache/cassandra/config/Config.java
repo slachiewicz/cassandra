@@ -531,12 +531,11 @@ public class Config
 
     /**
      * CASSANDRA-16360: which checksum algorithm to request for internode CRC-framed connections.
-     * {@code crc32c} is only actually selected when {@link StorageCompatibilityMode#current()} is
-     * {@link StorageCompatibilityMode#NONE} (i.e. the operator has confirmed every peer in the
-     * cluster is upgraded) -- see OutboundConnectionSettings#framing(ConnectionCategory). Defaults to
-     * {@code crc32} until that benchmark case is made for the operator's own hardware/JDK; see
-     * doc/modules/cassandra/pages/architecture/crc32c-plan.md Phase 0 for why this isn't a
-     * universal win.
+     * {@code crc32c} is only used when {@link StorageCompatibilityMode#current()} is
+     * {@link StorageCompatibilityMode#NONE} and cluster metadata records the peer at a release that
+     * decodes CRC32C framing; see OutboundConnectionSettings#framing(ConnectionCategory). Defaults to
+     * {@code crc32}: CRC32C only measured faster on CPUs with slow {@code pclmulqdq}; see
+     * doc/modules/cassandra/pages/architecture/crc32c-plan.md Phase 0.
      */
     public InternodeChecksumType internode_checksum_type = InternodeChecksumType.crc32;
 

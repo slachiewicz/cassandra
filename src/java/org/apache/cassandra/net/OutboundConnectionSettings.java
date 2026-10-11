@@ -31,6 +31,10 @@ import org.apache.cassandra.config.EncryptionOptions.ServerEncryptionOptions;
 import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.locator.Locator;
+import org.apache.cassandra.tcm.ClusterMetadata;
+import org.apache.cassandra.tcm.membership.NodeId;
+import org.apache.cassandra.tcm.membership.NodeVersion;
+import org.apache.cassandra.utils.CassandraVersion;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.StorageCompatibilityMode;
 
@@ -496,21 +500,67 @@ public class OutboundConnectionSettings
             // cleanly reject it the way an old peer's Framing.forId(3) does today).
             return Framing.LZ4;
 
-        return shouldUseCrc32c() ? Framing.CRC32C : Framing.CRC;
+        return shouldUseCrc32c(to) ? Framing.CRC32C : Framing.CRC;
     }
 
     /**
-     * CASSANDRA-16360: CRC32C internode framing is only selected when the operator has opted in
-     * (internode_checksum_type: crc32c) AND confirmed every peer in the cluster already understands
-     * it (storage_compatibility_mode: NONE). On any other compatibility mode -- including UPGRADING,
-     * which exists specifically to disable features incompatible with not-yet-upgraded peers -- this
-     * always resolves to CRC32, since there is no live per-connection capability check available at
-     * the point framing is chosen (see doc/modules/cassandra/pages/architecture/crc32c-plan.md §4.1a).
+     * CASSANDRA-16360: the first release whose nodes can decode {@link Framing#CRC32C}. Must match the
+     * release that actually ships CRC32C framing; update it if that is later than 7.0.0.
      */
-    private static boolean shouldUseCrc32c()
+    @VisibleForTesting
+    static final CassandraVersion CRC32C_FRAMING_SINCE = new CassandraVersion("7.0").familyLowerBound.get();
+
+    /**
+     * CASSANDRA-16360: CRC32C internode framing is selected only when all of these hold:
+     * <ul>
+     *     <li>the operator opted in with {@code internode_checksum_type: crc32c};</li>
+     *     <li>{@code storage_compatibility_mode} is {@code NONE}, so {@code UPGRADING} or a
+     *     {@code CASSANDRA_N} mode switches it off cluster-wide;</li>
+     *     <li>cluster metadata records a release version for the peer, and that version can decode
+     *     framing id 3.</li>
+     * </ul>
+     * Framing is sent in the first handshake message, before the peer answers, so the peer's
+     * capability has to come from cluster metadata rather than from the handshake. A peer that is
+     * not registered yet, or whose version is unknown, gets CRC32.
+     */
+    @VisibleForTesting
+    static boolean shouldUseCrc32c(InetAddressAndPort peer)
     {
         return DatabaseDescriptor.internodeChecksumType() == Config.InternodeChecksumType.crc32c
-               && StorageCompatibilityMode.current() == StorageCompatibilityMode.NONE;
+               && StorageCompatibilityMode.current() == StorageCompatibilityMode.NONE
+               && peerSupportsCrc32cFraming(peer);
+    }
+
+    private static boolean peerSupportsCrc32cFraming(InetAddressAndPort peer)
+    {
+        ClusterMetadata metadata = ClusterMetadata.currentNullable();
+        if (metadata == null)
+            return false;
+
+        NodeId id = metadata.directory.peerId(peer);
+        if (id == null)
+            return false;
+
+        NodeVersion version = metadata.directory.version(id);
+        return version != null && supportsCrc32cFraming(version.cassandraVersion);
+    }
+
+    @VisibleForTesting
+    static boolean supportsCrc32cFraming(CassandraVersion version)
+    {
+        return version != null && version.compareTo(CRC32C_FRAMING_SINCE) >= 0;
+    }
+
+    /**
+     * CASSANDRA-16360: the framing for the next connection attempt. A pool's framing is fixed when the
+     * pool is created, so a pool that chose CRC32C keeps it across reconnects. If the peer no longer
+     * qualifies (for example, its binary was downgraded under the same address), fall back to CRC32
+     * rather than failing every handshake until this node restarts. The opposite switch, from CRC32 to
+     * CRC32C, is never made on a live pool; it takes effect when this node restarts.
+     */
+    OutboundConnectionSettings withSafeFraming()
+    {
+        return framing == Framing.CRC32C && !shouldUseCrc32c(to) ? withFraming(Framing.CRC) : this;
     }
 
     // note that connectTo is updated even if specified, in the case of pre40 messaging and using encryption (to update port)

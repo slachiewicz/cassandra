@@ -92,12 +92,14 @@ New features
       for more information.
     - Internode (non-compressed) framing can optionally checksum payloads with
       CRC32C instead of CRC32, by setting internode_checksum_type: crc32c. It is
-      only actually used when storage_compatibility_mode is NONE, i.e. every node
-      in the cluster is already on a version that understands it; set
+      used only when storage_compatibility_mode is NONE, and only towards peers
+      that cluster metadata records at a release that understands it, so it is
+      safe to enable during a rolling upgrade; connections created before a peer
+      was upgraded keep CRC32 until this node restarts. Set
       internode_checksum_type back to crc32 cluster-wide before downgrading any
-      node. CRC32C is 6-8x faster on x86_64 CPUs without a vectorized CRC32 path
-      (roughly, pre-AVX2 era) and measures neutral elsewhere; benchmark on your
-      own hardware before enabling. See CASSANDRA-16360.
+      node. CRC32C is 6-8x faster on x86_64 CPUs with slow carry-less multiply
+      (Sandy Bridge, Ivy Bridge) and measures neutral on AMD Zen 3 and Apple M1;
+      benchmark on your own hardware before enabling. See CASSANDRA-16360.
 
 Upgrading
 ---------

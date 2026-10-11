@@ -1227,7 +1227,7 @@ public class OutboundConnection
                     messagingVersion = knownMessagingVersion;
                 }
 
-                settings = template;
+                settings = template.withSafeFraming();
                 if (messagingVersion > settings.acceptVersions.max)
                     messagingVersion = settings.acceptVersions.max;
 
