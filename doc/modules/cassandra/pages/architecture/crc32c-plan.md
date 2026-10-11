@@ -20,11 +20,9 @@
 
 # CASSANDRA-16360: CRC32 → CRC32C Migration Plan
 
-> Status: Phases 0–2 are **implemented** on this branch — Phase 0's benchmark
-> suite with three recorded runs (§2.2), Phase 1's plumbing (§3), and Phase 2's
-> opt-in internode CRC32C framing (§4, including its status note on what remains
-> open). Phase 3 (native protocol) and Phase 4 (on-disk formats) are not started.
-> Earlier sections written in the future tense are retained as the design record.
+> Status: Phase 0 benchmarks run on three platforms (§2.2). Phase 1 (plumbing) and
+> Phase 2 (internode CRC32C) are implemented on branch `CASSANDRA-16360-crc32c-plan`.
+> Phase 3 (native protocol) and Phase 4 (on-disk formats) are not started.
 
 ## 0. Ground rules (restated, binding across all phases)
 
@@ -61,7 +59,7 @@ which is exactly the pattern we must not replicate for CRC32C.
 | `HandshakeProtocol.java` (~line 40-68) | CRC32 over legacy 3-message handshake `Initiate`/`Accept` | `Crc.computeCrc32` | Legacy-vs-modern handshake is auto-detected by peer capability, not CRC-gated |
 | `OutboundConnectionSettings.java` `enum Framing` (lines 50-65) | `UNPROTECTED(0)`, `LZ4(1)`, `CRC(2)` — wire-encoded ordinal in handshake flags | N/A | Chosen from config (`internode_compression`/`internode_encryption`), independent of `MessagingService.Version` |
 | `OutboundConnectionInitiator.java` (~355-382) / `InboundConnectionInitiator.java` (~472-506) | Switch on `Framing` to pick encoder/decoder | N/A | Framing enum ordinal, decoupled from messaging version negotiation |
-| `MessagingService.java` `enum Version` (lines 215-229, 262-270) | `VERSION_30..VERSION_60`; `current_version` derived via `currentVersion()` (line 312) from `DatabaseDescriptor.getStorageCompatibilityMode().isBefore(N)` | N/A | This `isBefore(N)` / `AcceptVersions` min-max negotiation (lines 279-289) is the **idiom to reuse** for gating CRC32C |
+| `MessagingService.java` `enum Version` (lines 215-229, 262-270) | `VERSION_30..VERSION_60`; `current_version` derived via `currentVersion()` (line 312) from `DatabaseDescriptor.getStorageCompatibilityMode().isBefore(N)` | N/A | `isBefore(N)` / `AcceptVersions` min-max negotiation (lines 279-289). Not usable for CRC32C framing: framing is sent before negotiation completes, and 6.0 and trunk share `VERSION_60` (§4.1a) |
 | `journal/*` (`EntrySerializer.java`, `OnDiskIndex.java`, `Journal.java`, `Metadata.java`) | Accord/TCM journal integrity, via `Crc.crc32()` | `Crc.java` (same thread-local instance) | None |
 
 **Biggest hardcoded surface**: `Crc.java` has no `ChecksumType`
@@ -72,9 +70,9 @@ methods directly.
 
 | Location | What | Gate today |
 |---|---|---|
-| `src/java/org/apache/cassandra/transport/` | No CRC/Checksum usage found in the Java implementation today (`grep` across the package is empty) | N/A — v5 framing checksums described in the spec are **not yet implemented** in the transport package; only internode `net.Frame*` classes implement CRC framing |
+| `src/java/org/apache/cassandra/transport/` | Native protocol v5 framing **is implemented**, by reusing the internode codecs: `PipelineConfigurator.java:390,399` and `SimpleClient.java:603,613` use `net.FrameDecoderCrc.create(allocator)` and `net.FrameEncoderCrc.instance`, and `Flusher.java:55` sizes payloads from their header and trailer lengths | Protocol version only. Any change to the `net.FrameEncoderCrc`/`FrameDecoderCrc` CRC32 singletons is also a change to the client protocol, so Phases 1 and 2 must leave them byte-identical. |
 | `ProtocolVersion.java` | `enum {V3, V4, V5, V6(6,"v6-beta", true)}` (lines 42-70); `CURRENT = V5` (87); `BETA = Optional.of(V6)` (88); `isBeta()` (136-139) | Beta-flag idiom: `Envelope.java:441` rejects a beta version unless the client sets `Header.Flag.USE_BETA`; mirrored client-side in `Client.java:61`, `SimpleClient.java:167,206`. **This is the idiom to reuse for staging v6/CRC32C framing.** |
-| `doc/native_protocol_v5.spec` (lines 84-173) | Documents CRC24 header + CRC32 payload trailer framing — the authoritative on-wire description, currently unimplemented in Java transport code but mirrored by internode `Crc.java`/`FrameEncoderCrc` | N/A |
+| `doc/native_protocol_v5.spec` (lines 84-173) | Documents CRC24 header + CRC32 payload trailer framing — the authoritative on-wire description, implemented by the shared `net.FrameEncoderCrc`/`FrameEncoderLZ4` codecs | N/A |
 | `doc/native_protocol_v3.spec`, `doc/native_protocol_v4.spec` | No framing checksum (pre-v5) | N/A |
 
 ### (c) On-disk formats
@@ -108,7 +106,10 @@ methods directly.
 1. **`MessagingService.currentVersion()`** (net/MessagingService.java:312):
    `DatabaseDescriptor.getStorageCompatibilityMode().isBefore(5) ? VERSION_40
    : VERSION_60`, combined with per-connection `AcceptVersions` min/max
-   negotiation (lines 279-289). → model for internode CRC32C enablement.
+   negotiation (lines 279-289). Considered for internode CRC32C and
+   rejected (§4.1a); Phase 2 uses the peer's release version from cluster
+   metadata instead (`Directory.version(NodeId)`, the per-node source behind
+   `directory.clusterMinVersion`).
 2. **`BigFormat.java` two-letter version + `compareTo`** (lines 436-505):
    `hasMetadataChecksum = version.compareTo("na") >= 0`, and
    `correspondingMessagingVersion` cross-referencing a `MessagingService.Version`.
@@ -201,7 +202,7 @@ Phase 2 or Phase 3 implementation begins.
 > **Append a new dated subsection below (§2.2 RUN 2, RUN 3, ...) for each
 > additional (JDK, arch) combination run — do not overwrite RUN 1.** Each
 > subsection should follow the same format: an **Environment** line (JDK
-> version, OS, CPU model/arch, build/run commands — copy §2.4 verbatim if
+> version, OS, CPU model/arch, build/run commands — copy §2.3 verbatim if
 > unchanged), the same results table shape, and a gate verdict statement.
 > Once at least one x86_64 run exists, add a summary row/table comparing
 > the gate verdict across all recorded platforms before using this section
@@ -212,7 +213,7 @@ Phase 2 or Phase 3 implementation begins.
 compiled classes, run via `java -cp ... org.openjdk.jmh.Main`, default class-level
 JMH settings (`@Warmup(3, 1s)`, `@Measurement(5, 2s)`, 1 fork, `Threads(4)`).
 Raw CSVs: `crc32_vs_crc32c.csv` (60 combinations), `crc32_coldcache.csv`,
-`crc24.csv` — generated by the exact commands in §2.4 below, not committed to
+`crc24.csv` — generated by the exact commands in §2.3 below, not committed to
 the repo (regenerate on demand; the numbers below are transcribed from them).
 
 GB/s computed as `bufferSize / ns_per_op` (1 byte/ns = 1 GB/s).
@@ -276,7 +277,7 @@ flame graph, as the plan already calls for in end-to-end benchmarks). It does
 intrinsic-enabled (real production) paths — the `-NoIntrinsic` runs are
 diagnostic-only and were never the basis for the gate.
 
-**Action required before Phase 2/3 proceed:** re-run this exact suite (§2.4
+**Action required before Phase 2/3 proceed:** re-run this exact suite (§2.3
 gives the commands) on x86_64 hardware with SSE4.2 (the architecture the
 ticket's original numbers and rationale are based on) before treating the
 gate as passed anywhere. This ARM64 run should be read as "the CRC32C
@@ -296,7 +297,7 @@ global rollout decision.
 x86_64: SSE4.2 + `pclmulqdq`, AVX but **no AVX2 / AVX-512 / `vpclmulqdq`**),
 KVM guest with 4 vCPU (1 thread/core, matching `@Threads(4)`) / 15GB RAM
 (Rackspace Spot `gp.vs1.large`, us-central-dfw-1). Same test classes as RUN 1
-(Java 21 bytecode from `ant build-test`), same per-class JMH settings; the §2.4
+(Java 21 bytecode from `ant build-test`), same per-class JMH settings; the §2.3
 sweep was split into one `org.openjdk.jmh.Main` invocation per benchmark method
 with separate CSVs so spot-instance preemptions only cost the chunk in flight
 (parameters otherwise identical). Raw CSVs not committed (same policy as RUN 1).
@@ -337,10 +338,24 @@ disabling intrinsics slows both paths as expected (CRC32 56243 → 65888 ns,
 CRC32C 7131 → 116928 ns at 128KB HEAP), so RUN 1's M1-specific 128KB
 no-intrinsic anomaly does **not** reproduce on x86_64.
 
+**Why CRC32 is so slow here, and what is still unverified.** The JDK's x86 CRC32
+intrinsic folds with `pclmulqdq`. On Ivy Bridge that instruction has a measured
+reciprocal throughput of 8 cycles, against 2 on Haswell and 1 on Skylake
+([uops.info](https://uops.info/html-instr/PCLMULQDQ_XMM_XMM_I8.html)). That
+explains both the ~2.3 GB/s CRC32 plateau and why disabling the intrinsic costs
+only 17%: the folding path is barely faster than the table fallback on this
+core. Two things are not explained or recorded:
+- CRC32 at 31B takes 83 ns, about 10× RUN 1 and RUN 3. Short buffers take the
+  intrinsic's byte-at-a-time tail, but that does not obviously account for 10×.
+- Unlike RUN 1, this run did not record `-XX:+PrintFlagsFinal` or the guest's
+  CPU flags (§2.3), so it is not proven that the guest exposed `pclmulqdq` and
+  that `UseCRC32Intrinsics` was on. Re-run with those recorded before quoting
+  RUN 2 upstream.
+
 ### 2.2 Baseline results table (RUN 3 — x86_64 / AMD EPYC Milan (Zen 3), 2026-07-19)
 
 **Environment:** identical JDK/OS/harness to RUN 2 (JDK 21.0.11, Ubuntu 24.04,
-kernel 6.8.0-60-generic, chunked §2.4 sweep), AMD EPYC-Milan Processor (Zen 3,
+kernel 6.8.0-60-generic, chunked §2.3 sweep), AMD EPYC-Milan Processor (Zen 3,
 x86_64: SSE4.2, `pclmulqdq` **and** `vpclmulqdq`, AVX2, AVX-512), KVM guest
 with 4 vCPU (1 thread/core) / 8GB RAM (Rackspace Spot `ch.vs2.large`,
 us-central-dfw-2).
@@ -387,25 +402,27 @@ toggles behave as expected (CRC32 2311 → 30121 ns, CRC32C 2300 → 74544 ns at
 **Reading for Phase 2/3 (as required by §4.3):** the gate — "≥20% at 16KB and
 128KB … on at least one of x86_64/ARM64" — is now formally **PASSED**, via
 RUN 2. The three runs together sharpen the claim: the CRC32C advantage is a
-property of **older x86_64** (SSE4.2 without a CLMUL-vectorized CRC32 path),
-while current-generation CPUs (Zen 3 x86_64, Apple M1 arm64) show parity
-within ±1%. Nowhere measured is CRC32C *slower* by more than noise (worst
-case −0.3%, 16KB DIRECT on Zen 3). Be precise about what "PASSED" therefore
-does and does not mean: the gate's "at least one platform" clause was written
-when the working assumption was that the CRC32C win generalized across
-hardware; the evidence shows it does not. The honest project-level case is
-**"opt-in benefit for the pre-AVX2-era x86 fleet, measured no-penalty
-everywhere else"** — a cohort that was the ticket's original (2020)
-motivation and that shrinks every year — not "CRC32C is faster." That is
-sufficient to justify Phase 2 as an **opt-in** feature with a `crc32`
-default (§4.3), and insufficient, on present evidence, to justify flipping
-the default or investing in Phase 3/4 on performance grounds alone. Caveat:
-JDK-8-era branches must still skip the software fallback (PureJavaCrc32C
+property of x86_64 cores with slow `pclmulqdq`, which per the throughput
+figures above means Sandy Bridge and Ivy Bridge (2011–2013), while
+current-generation CPUs (Zen 3 x86_64, Apple M1 arm64) show parity within
+±1%. Haswell through Skylake-era Xeons, still common in on-premises fleets,
+are untested; their 4–8× faster `pclmulqdq` suggests a much smaller gap, but
+that needs a run, not an inference. Nowhere measured is CRC32C *slower* by
+more than noise (worst case −0.3%, 16KB DIRECT on Zen 3). Be precise about
+what "PASSED" therefore does and does not mean: the gate's "at least one
+platform" clause was written when the working assumption was that the CRC32C
+win generalized across hardware; the evidence shows it does not. The honest
+project-level case is **"opt-in benefit for x86 CPUs with slow carry-less
+multiply, measured no-penalty everywhere else"**, not "CRC32C is faster."
+That is sufficient to justify Phase 2 as an **opt-in** feature with a
+`crc32` default (§4.3), and insufficient, on present evidence, to justify
+flipping the default or investing in Phase 3/4 on performance grounds alone.
+Caveat: JDK-8-era branches must still skip the software fallback (PureJavaCrc32C
 confirmed at only 1.1–1.65 GB/s on both x86 machines, i.e. 2–14× *slower*
 than intrinsic CRC32). All three runs used JDK 21.0.11; the §2.2 preamble's
-ask for JDK 11/17 datapoints remains open.
+asks for JDK 11/17 datapoints and a Haswell/Skylake-era x86_64 run remain open.
 
-### 2.4 Exact commands to reproduce or extend this run
+### 2.3 Exact commands to reproduce or extend this run
 
 ```
 ant build-test   # compiles the 3 new classes under test/microbench
@@ -420,11 +437,16 @@ java -cp "$CP" org.openjdk.jmh.Main "Crc32ColdCacheBench" -rf csv -rff crc32_col
 java -cp "$CP" org.openjdk.jmh.Main "Crc24Bench" -rf csv -rff crc24.csv
 ```
 
-JDK version / CPU model / JVM flags recorded alongside every row (see §2.3);
-repeat this on x86_64 SSE4.2 hardware and append a second results table here
-before using this section as evidence for a Phase 2/3 go decision.
+Record the JDK version, CPU model and JVM flags with every run (see §2.4). On
+each new platform, also record the intrinsic flags, so a slow row can be told
+apart from a disabled intrinsic:
 
-### 2.3 End-to-end benchmarks (repeated after each phase lands)
+```
+java -XX:+PrintFlagsFinal -version | grep -E 'UseCRC32(C)?Intrinsics|UseCLMUL'
+grep -o -w -E 'sse4_2|pclmulqdq|vpclmulqdq|avx2|avx512f' /proc/cpuinfo | sort -u   # x86_64 Linux
+```
+
+### 2.4 End-to-end benchmarks (repeated after each phase lands)
 
 - **Internode**: existing messaging microbenchmarks (`MessageOutBench.java`
   as a structural template) extended to report CPU share, plus a two-node
@@ -480,12 +502,9 @@ a new test-scope JMH class.
 >   `HintsWriter` itself has no `public` modifier), were changed in place
 >   with no compatibility shim, since no external `.class` file could
 >   possibly hold a reference to them.
-> - Reviewed by a second model pass (Opus) with no correctness or
->   binary-compatibility gaps found beyond the `ChecksummedDataInput` item
->   above, which was then fixed. Verified via `ant build-test` (clean
->   compile) and 8 existing unit test suites across commit log, hints, and
->   compressed-writer paths (all pass unmodified, confirming byte-identical
->   behavior).
+> - Verified via `ant build-test` (clean compile) and 8 existing unit test
+>   suites across commit log, hints, and compressed-writer paths (all pass
+>   unmodified, confirming byte-identical behavior).
 > - A third review pass (2026-08-11) found one further binary-compatibility
 >   gap the above missed: giving `FrameEncoderCrc` a private
 >   `ChecksumType`-taking constructor silently *removed* the implicit public
@@ -563,32 +582,15 @@ byte-identical wire/disk output to today.
 
 ---
 
-## 4. Phase 2 — Internode CRC32C, gated by StorageCompatibilityMode
+## 4. Phase 2 — Internode CRC32C, gated by opt-in, compatibility mode and peer release version
 
-> **Status: implemented** (this branch), after a design revision: while scoping
-> the implementation, reading the actual `OutboundConnectionInitiator`/
-> `HandshakeProtocol` code revealed that the "per-connection negotiation,
-> lowest-common-version wins" design originally written below is **not
-> achievable as described**, for a concrete architectural reason (§4.1a).
-> The design was corrected to §4.1b before any code was written, per
-> this project's own ground rule: never guess at wire-protocol safety.
->
-> **Implemented:** `Framing.CRC32C(3)` + hardened `forId` throwing
-> `UnknownFramingException`; the `internode_checksum_type` yaml option and its
-> `StorageCompatibilityMode.NONE` gate in `framing(category)`; CRC32C encode/
-> decode in `FrameEncoderCrc`/`FrameDecoderCrc` (unprimed, per §4.1b); per-peer
-> `Framing` gauges on `InternodeOutboundMetrics`/`InternodeInboundMetrics`
-> (§4.6a); unit tests for the gating matrix, CRC32C round-trip, corruption
-> detection, known-answer trailer values, and log classification. Two
-> asymmetries worth knowing: **inbound acceptance is capability-based, not
-> config-based** — a node with this code decodes CRC32C framing from a peer
-> regardless of its own `internode_checksum_type`/compatibility-mode settings,
-> which is what makes the §4.5 config rollback safe with no restart-order
-> dependency (only senders consult the gate); and the §4.4 item 4 "operator
-> declared NONE too early" failure mode is surfaced on the *sending* node by a
-> dedicated no-spam WARN in `OutboundConnectionInitiator#channelInactive`
-> (see the §4.6a item 1 correction below for why the receiving old node cannot
-> produce a distinct message).
+> **Status: implemented** (branch `CASSANDRA-16360-crc32c-plan`), except the
+> mixed-version dtests in §4.4. The original "negotiate in the handshake,
+> lowest common version wins" design does not fit the handshake, because
+> framing is sent before the peer answers (§4.1a). The implemented gate
+> (§4.1b) decides before connecting, from the operator's opt-in, the
+> compatibility mode, and the peer's release version as recorded in cluster
+> metadata.
 >
 > **Not implemented (still open):** the §4.4 mixed-version /
 > mixed-compatibility-mode **dtests** (items 1–5) — the unit tests above cover
@@ -602,74 +604,88 @@ internode frame checksums, with CRC32 remaining available forever for peers
 that don't, and no scenario where an old peer receives a framing byte it
 cannot decode.
 
-### 4.1a Why "negotiate per-connection" doesn't work here
+### 4.1a Why framing can't be negotiated in the handshake
 
-`OutboundConnectionSettings.framing(category)` (net/OutboundConnectionSettings.java:454-464)
-picks the framing (`UNPROTECTED`/`LZ4`/`CRC`) **before any handshake
-round-trip occurs** — it's a static, local decision derived purely from
-config (is internode compression enabled?), computed once when the
-connection pool's settings are built. That choice is serialized into the
-very first wire message the connecting node sends (`HandshakeProtocol.Initiate`,
-`net/HandshakeProtocol.java:101-123`), alongside the proposed messaging
-`AcceptVersions` range — but the *accepting* peer's messaging version isn't
-known to the connecting node until its response comes back one round-trip
-later (`net/OutboundConnectionInitiator.java:356-357`, where `useMessagingVersion`
-is first read). By the time a messaging-version mismatch is discovered and
-retried (`Result.incompatible`/`Result.retry`, lines 366 and 536-537 of the
-same file), the framing byte has *already been sent* in the first message —
-there is no equivalent retry path for "the peer didn't understand your
-framing choice." An old peer's `Framing.forId(int)` (a plain `switch` with
-no `default`, `net/OutboundConnectionSettings.java:59-68`) would throw
-`IllegalStateException` on an unrecognized id, which is not a clean,
-loggable "negotiation failed, falling back" outcome — it's an abrupt decode
-failure, exactly the "surfaces as corruption/crash instead of a clean
-version error" failure mode the ground rules warn about, just one level up
-the stack from an actual checksum mismatch.
+`OutboundConnectionSettings.framing(category)` picks the framing
+(`UNPROTECTED`/`LZ4`/`CRC`) **before any handshake round-trip occurs**, from
+local config (is internode compression enabled for this peer?). That choice is
+serialized into the very first wire message the connecting node sends
+(`HandshakeProtocol.Initiate`, `net/HandshakeProtocol.java:101-123`), alongside
+the proposed messaging `AcceptVersions` range. The accepting peer decodes the
+framing id (`HandshakeProtocol.java:166-167`) before it verifies the
+message's own CRC, and there is no retry path for "the peer didn't understand your framing
+choice": the messaging-version RETRY path (`OutboundConnection.java:1183`)
+only re-sends with a different messaging version.
 
-The one favorable fact: `Framing.id` is already wire-encoded as 2 bits
-or a value which can represent `0`–`3`
+On a peer that predates CRC32C framing, `Framing.forId(3)` throws a plain
+`IllegalStateException`. The inbound handler's generic `exceptionCaught`
+branch logs it as `"Failed to properly handshake with peer {}. Closing the
+channel."` and closes the channel. That is not a crash, but it repeats on
+every reconnect, and the log line is the same one a real CRC failure in the
+handshake produces. Nothing shipped here can change that old-peer behavior.
+On nodes running the new code, `forId` can no longer fail for any id the
+2-bit field can carry (§4.6a item 1 correction), so the useful signal is the
+sender-side warning in `OutboundConnectionInitiator#channelInactive`.
+
+The outbound side does know the peer's *messaging* version before
+connecting (`endpointToVersion`, `OutboundConnection.java:1103`), but that
+doesn't help: 6.0 and trunk both top out at `VERSION_60`, so the messaging
+version can't tell a peer that decodes framing id 3 from one that doesn't.
+The peer's *release* version can, and cluster metadata already records it
+(§4.1b).
+
+The one favorable fact: `Framing.id` is already wire-encoded as two bits
 (`HandshakeProtocol.Initiate.encodeFlags()`, line 118:
-`(framing.id & 1) << 2 | (framing.id & 2) << 3`), and only `0,1,2` are used
-today. So `CRC32C(3)` needs **no wire format change** — the only open
-question is how to know, before the first message is ever sent, that it's
-safe to use it.
+`(framing.id & 1) << 2 | (framing.id & 2) << 3`, i.e. flag bits 2 and 4),
+and only `0,1,2` were used. So `CRC32C(3)` needs **no wire format change**.
+The open question is how to know, before the first message is sent, that the
+peer can decode it.
 
-### 4.1b Corrected design: gate on `StorageCompatibilityMode`, not live negotiation
+### 4.1b Implemented design: decide before connecting
 
-Rather than a live per-connection capability check (which this codebase's
-handshake sequencing doesn't support without a larger protocol change — see
-§4.1c for that alternative and why it's out of scope here), gate
-`Framing.CRC32C` selection the same way the project already gates other
-changes that aren't safe to auto-detect per connection:
-`StorageCompatibilityMode` (`utils/StorageCompatibilityMode.java`) already
-has an `UPGRADING` value explicitly documented as "disabling features that
-are not compatible with any not-upgraded nodes in the cluster... once all
-nodes have been upgraded, you can set the compatibility to `NONE`." This is
-precisely the operator-driven safety mechanism this feature needs, already
-built and already the idiom operators know from other post-4.0 rollouts.
+`OutboundConnectionSettings.framing(category)` returns `Framing.CRC32C` only
+when all three conditions hold (`shouldUseCrc32c(peer)`):
 
-- `OutboundConnectionSettings.framing(category)` gains a config-driven
-  branch: return `Framing.CRC32C` only when (a) a new
-  `internode_checksum_type: crc32c` yaml option is set (default `crc32`)
-  **and** (b) `StorageCompatibilityMode.current() == StorageCompatibilityMode.NONE`
-  — i.e. the operator has explicitly asserted the whole cluster is already
-  upgraded to a version that understands CRC32C framing, the same
-  precondition operators already satisfy before relying on other
-  `NONE`-gated behavior. `UPGRADING` and any `CASSANDRA_N` mode continue to
-  produce `Framing.CRC`/`LZ4` exactly as today.
-- `Framing.forId(int id)` gains a `case 3: return CRC32C;` branch — this is
-  required regardless of the gating mechanism, since a node that has
-  chosen CRC32C will send id `3` and its peer (by construction, also on
-  `NONE` mode with CRC32C enabled) must decode it.
-- `FrameEncoderCrc`/`FrameDecoderCrc`'s existing Phase-1
-  `getInstance(ChecksumType)`/`create(allocator, ChecksumType)` entry
-  points are reused with `ChecksumType.CRC32C` — this phase's actual new
-  work is removing their `UnsupportedOperationException` guard and
-  deciding the CRC32C priming question Phase 1 deferred (§3.1: no reuse of
-  CRC32's magic prefix bytes, since that priming was CRC32-specific tuning
-  with no established rationale for CRC32C — plain, unprimed
-  `ChecksumType.CRC32C.newInstance()` is the simplest defensible choice,
-  matching how `ChecksumType.CRC32C` is used everywhere else in Phase 1).
+1. **Operator opt-in:** `internode_checksum_type: crc32c` (default `crc32`).
+2. **Compatibility mode:** `storage_compatibility_mode` is `NONE`.
+   `UPGRADING` or any `CASSANDRA_N` value turns CRC32C off. This is the
+   operator's off-switch, not the safety mechanism: `NONE` is the shipped
+   default (`conf/cassandra.yaml`), and the enum only tracks majors
+   (`CASSANDRA_4`, `CASSANDRA_5`; there is no `CASSANDRA_6`). A rolling
+   6.0→7.0 upgrade where the operator skips `UPGRADING`, or a feature that
+   lands in a minor release, would leave every node on `NONE` with peers that
+   can't decode framing id 3.
+3. **Peer release version:** the peer is registered in cluster metadata and
+   its recorded release version is at least `CRC32C_FRAMING_SINCE` (the 7.0
+   family lower bound, so 7.0 pre-releases and snapshots count). An
+   unregistered peer, or one with no recorded version, gets `CRC`. This is
+   the same source the codebase already uses for version-dependent behavior
+   (`directory.clusterMinVersion` in `QueryProcessor.java:750` and
+   `IndexStatusManager.java:247`); it is checked per peer rather than
+   cluster-wide, so two upgraded nodes can use CRC32C while older peers remain.
+   `CRC32C_FRAMING_SINCE` must name the release that actually ships this; if
+   that is later than 7.0.0, update the constant.
+
+Other parts of the design:
+
+- `Framing.forId(int)` gains `case 3: return CRC32C;` and throws
+  `UnknownFramingException` (an `IOException`) for unknown ids.
+- **A pool's framing is fixed when the pool is created.** `withDefaults`
+  copies `framing(category)` into the connection template, and a pool lives
+  as long as the node does. Two consequences:
+  - *Peer stops qualifying* (binary downgraded under the same address, or
+    metadata otherwise reports an older release): each connection attempt
+    calls `withSafeFraming()`, which drops a `CRC32C` template to `CRC`, so
+    reconnects succeed instead of failing every handshake.
+  - *Peer starts qualifying* (it was upgraded after this node created its
+    pool to it): the pool keeps `CRC` until this node restarts. In practice,
+    a cluster uses CRC32C everywhere only after one more rolling restart
+    following the upgrade.
+- The inbound side decodes whatever framing the peer chose, regardless of
+  its own `internode_checksum_type`. Only the sender's settings matter.
+- `FrameEncoderCrc`/`FrameDecoderCrc` gain CRC32C instances next to the
+  unchanged CRC32 singletons, which the native protocol also uses (§1(b)).
+  CRC32C is unprimed; the magic-prefix priming stays CRC32-only.
   Review note on why unprimed is safe here: the classic argument for
   priming — an all-zeros region checksums to zero and so decodes as a
   valid empty frame — does not apply to this framing, because the frame
@@ -682,27 +698,20 @@ built and already the idiom operators know from other post-4.0 rollouts.
   (`FramingTest#testKnownAnswerTrailers` pins `"123456789"` →
   `0xE3069283`), which any future third-party implementation can verify
   against directly.
-- `MessagingService.Version.VERSION_70` (next ordinal after `VERSION_60` —
-  re-verify against the tree at implementation time, since this is
-  advisory naming, not load-bearing for the gating mechanism above) can
-  still be added for bookkeeping/documentation of when CRC32C-capable code
-  shipped, but it is **not** the gating mechanism — `StorageCompatibilityMode`
-  is. This is a deliberate departure from this plan's earlier draft, which
-  conflated "new capability shipped in version N" with "safe to
-  auto-negotiate per connection," which turned out not to hold for framing.
-- `HandshakeProtocol`'s legacy 3-message path and the 2-message
-  `AcceptVersions` exchange are both untouched — this design doesn't touch
-  messaging-version negotiation at all, only the pre-handshake framing
-  choice, which is now StorageCompatibilityMode-gated instead of
-  version-gated.
+- **Compressed connections keep `LZ4` with CRC32.** All four framing ids are
+  now used, and an `LZ4`+CRC32C id would need a wider encoding that old peers
+  would misread rather than reject. With the default
+  `internode_compression: dc`, this means CRC32C applies to intra-DC
+  connections only.
+- No new `MessagingService.Version` is needed.
 
 ### 4.1c Alternative considered and rejected for this phase: real capability pre-check
 
 A more "correct in the abstract" fix would add an actual round-trip before
 framing is committed to, so the connecting node learns the peer's supported
-framings before ever sending one. This would remove the
-`StorageCompatibilityMode` operator-trust requirement and allow true
-per-connection auto-negotiation, matching this plan's original intent. It
+framings before ever sending one. This would also cover peers that cluster
+metadata doesn't know yet, and pick up a newly upgraded peer without a
+restart. It
 is explicitly **out of scope for this phase**: it changes the handshake
 wire format itself (not just an added framing id), has broader blast
 radius (affects every connection, not just CRC32C-curious ones), and needs
@@ -711,129 +720,93 @@ CRC32C. If a future need arises for finer-grained auto-negotiation of
 per-connection capabilities beyond framing, this is the design to revisit,
 tracked as a follow-on idea rather than folded into CASSANDRA-16360.
 
-### 4.2 Files to change
+### 4.2 Files changed
 
-- `utils/StorageCompatibilityMode.java` — no new enum value needed; reuse
-  existing `NONE`/`UPGRADING`/`CASSANDRA_N` values as the gate.
-- `net/OutboundConnectionSettings.java` — new `Framing.CRC32C(3)` ordinal;
-  `forId(int)` gains `case 3`; `framing(ConnectionCategory)` (lines
-  ~454-464) gains the config-and-compat-mode-gated branch described in
-  §4.1b, checked *before* the existing LZ4-vs-CRC compression check.
-- `net/FrameEncoderCrc.java`, `net/FrameDecoderCrc.java` — remove the
-  Phase-1 `UnsupportedOperationException` guard for `ChecksumType.CRC32C`;
-  implement the actual CRC32C encode/decode path (unprimed
-  `ChecksumType.CRC32C.newInstance()`, per §4.1b). LZ4 variants are a
-  straightforward mirror once the CRC-only variant is proven correct — no
-  design difference beyond "payload is decompressed first."
+- `config/Config.java`, `config/DatabaseDescriptor.java`, `conf/cassandra.yaml`
+  — new `internode_checksum_type` (`crc32`/`crc32c`, default `crc32`), plus a
+  test-only `setStorageCompatibilityMode`.
+- `net/OutboundConnectionSettings.java` — `Framing.CRC32C(3)`,
+  `UnknownFramingException`, the three-part gate (`shouldUseCrc32c`,
+  `CRC32C_FRAMING_SINCE`), and `withSafeFraming()`.
+- `net/OutboundConnection.java` — each connection attempt uses
+  `template.withSafeFraming()`.
+- `net/OutboundConnections.java` — `framing()`, the framing the pool uses.
 - `net/OutboundConnectionInitiator.java`, `net/InboundConnectionInitiator.java`
-  — extend the existing `switch (settings.framing)` (already present from
-  Phase 1) with a `case CRC32C` branch calling
-  `FrameEncoderCrc.getInstance(ChecksumType.CRC32C)` /
-  `FrameDecoderCrc.create(allocator, ChecksumType.CRC32C)`.
-- `config/Config.java` / `conf/cassandra.yaml` — new
-  `internode_checksum_type` setting (values `crc32`/`crc32c`, default
-  `crc32`).
-- No `MessagingService.java` change is required for the gating mechanism
-  itself (see §4.1b) — adding `VERSION_70` remains optional bookkeeping,
-  not load-bearing.
+  — `case CRC32C` encoder/decoder selection; the sender-side WARN when a
+  CRC32C handshake is closed mid-way; a defensive inbound log branch for
+  `UnknownFramingException` (§4.6a).
+- `CHANGES.txt`, `NEWS.txt` — the opt-in and its limits.
+- `net/FrameEncoderCrc.java`, `net/FrameDecoderCrc.java` — CRC32C instances;
+  the CRC32 singletons are unchanged.
+- `net/InboundMessageHandlers.java`, `metrics/InternodeInboundMetrics.java`,
+  `metrics/InternodeOutboundMetrics.java` — per-peer `Framing` gauges (§4.6a).
 
 ### 4.3 When CRC32C framing becomes available / default
 
-- **Available** (operator can opt in): as soon as this phase ships, an
-  operator running an all-upgraded cluster (`storage_compatibility_mode:
-  NONE`, the existing yaml default) can set
-  `internode_checksum_type: crc32c` and get it immediately — no waiting on
-  a `current_version`/messaging-version gate, since the gate is
-  compatibility-mode-based, not version-based.
-- **Default for new clusters**: not before the dtests in §4.4 are green.
-  The Phase 0 gate is now formally passed (§2.2 RUN 2, SSE4.2-era x86_64),
-  but the three-platform picture (§2.2 summary) shows the win is confined
-  to the older-x86 hardware cohort while modern x86_64 and arm64 measure
-  parity — so flipping the default buys nothing for current-generation
-  fleets and the perf case alone does not justify the churn. Keep
-  `internode_checksum_type: crc32` as the shipped default; revisit as a
-  config-default decision (not a version-enum one) if/when the §4.4 dtests
-  are green and operator demand on older-x86 fleets warrants it.
+- **Available as an opt-in** from the release that ships this phase. With
+  `internode_checksum_type: crc32c`, a node uses CRC32C to every peer that
+  cluster metadata records at that release or later, and CRC32 to the rest,
+  so the opt-in is safe to set during a rolling upgrade.
+- **Default:** not recommended on the current evidence. §2.2 shows parity on
+  Apple M1 and Zen 3, and a large gain only on Ivy Bridge, whose slow
+  `pclmulqdq` explains the gap. Revisit after a Haswell- or Skylake-era
+  x86_64 run (§2.2). Flipping the default is a config-default change and
+  needs no new `MessagingService.Version`.
 
 ### 4.4 Test plan
 
-- Unit: `FrameEncoderCrc`/`FrameDecoderCrc` round-trip tests parameterized
-  over both `ChecksumType` values (extends Phase 1's byte-identical tests
-  with a second, intentionally-different-output case now that CRC32C is a
-  real caller). Include a known-answer CRC32C test vector (Castagnoli
-  polynomial) independent of `java.util.zip.CRC32C` itself, to catch a
-  priming/byte-order mistake that a self-consistent round-trip test alone
-  would miss.
-- Unit: `OutboundConnectionSettings.framing(category)` gating logic —
-  table-test all combinations of `internode_checksum_type` ×
-  `StorageCompatibilityMode` value, asserting `Framing.CRC32C` is chosen
-  only for the single `crc32c` × `NONE` combination.
-- JMH: re-run `Crc32VsCrc32cBench` in the actual frame-encode path (not
-  just the raw checksum call) to confirm end-to-end frame throughput gain
-  matches the Phase 0 raw-checksum gain, ruling out the abstraction
-  overhead eating the benefit. Run on x86_64 given the Phase 0 gate's
-  current fail status on arm64.
-- **Mixed-version / mixed-compatibility-mode dtests** (the critical new
-  coverage — note these now test *compatibility-mode* transitions, not a
-  live per-connection version negotiation, since §4.1b changed the gating
-  mechanism):
-  1. 3-node cluster, all on old version, `storage_compatibility_mode: NONE`
-     (today's default) — baseline, must pass unchanged (CRC32 framing,
-     `internode_checksum_type` not yet a recognized option).
-  2. Rolling upgrade with `storage_compatibility_mode: UPGRADING` set on
-     every node throughout the upgrade (the documented operator procedure)
-     and `internode_checksum_type: crc32c` set on upgraded nodes — assert
-     `Framing.CRC32C` is **never** selected while any node reports
-     `UPGRADING`, even on connections between two already-upgraded nodes
-     (the gate is cluster-wide-honest by design, not per-connection-clever).
-  3. Once all nodes are upgraded and the operator flips
-     `storage_compatibility_mode: NONE` cluster-wide (the documented final
-     step), restart nodes and confirm connections between two nodes with
-     `crc32c` configured now select `Framing.CRC32C` (verify via internode
-     connection metrics/JMX exposing negotiated framing type per
-     connection — add such a metric if none exists).
-  4. Negative test: manually force a `NONE`+`crc32c` node to connect to an
-     old-version peer that doesn't have `case 3` in `Framing.forId` (i.e.
-     simulate the "operator declared NONE too early" mistake) and confirm
-     the resulting failure is a clean, loggable decode rejection rather
-     than an unhandled `IllegalStateException` propagating out of the
-     pipeline — this may require hardening `Framing.forId`/its caller to
-     convert the `IllegalStateException` into the same
-     `Incompatible`/connection-reset path used for messaging-version
-     mismatches, rather than assuming operators never make this mistake.
-  5. Fault injection: corrupt a byte in a CRC32C-framed payload in a test
-     harness and confirm it's caught as a checksum failure (connection
-     reset/reconnect), not silently accepted — i.e. CRC32C's own
-     correctness, not just the gating.
+Done (unit):
+
+- `FramingTest`: CRC32C round trip through the shared encoder/decoder
+  harness, bit-flip detection, `Framing.forId` negative test, and a
+  known-answer test asserting the trailer for `"123456789"` is the published
+  CRC-32C check value `0xE3069283` (pinning "unprimed"), and that the CRC32
+  trailer equals a plain `java.util.zip.CRC32` fed the `Crc` magic prefix and
+  then the payload (pinning the historical priming).
+- `OutboundConnectionSettingsTest`: the `internode_checksum_type` ×
+  `storage_compatibility_mode` table for a registered 7.0 peer; CRC for a
+  peer registered at 6.0.1 and for an unregistered peer; the release-version
+  boundary; `withSafeFraming()` in both directions.
+- `InternodeOutboundMetricsTest`, `InboundMessageHandlersFramingTest`: the
+  per-peer `Framing` gauges, including that the outbound gauge reports the
+  pool's framing rather than the current config.
+- `InboundConnectionInitiatorTest`: the defensive inbound log branch.
+
+Still needed: the end-to-end frame-path JMH re-run, and these in-JVM dtests
+across versions (none written yet):
+
+1. 3-node cluster, all on the old release — baseline, unchanged.
+2. Rolling 6.0→7.0 upgrade with `internode_checksum_type: crc32c` on upgraded
+   nodes and `storage_compatibility_mode` left at the default `NONE`.
+   Assert: no handshake failures; upgraded→old connections report `CRC` on
+   the outbound `Framing` gauge; upgraded→upgraded connections report
+   `CRC32C` only where the pool was created after the peer registered at 7.0.
+3. The same upgrade with `UPGRADING` throughout: `CRC` everywhere.
+4. After the upgrade and one more rolling restart: `CRC32C` on every
+   uncompressed connection, and inbound and outbound gauges agree per peer.
+5. Downgrade one node's binary to 6.0 under the same address: once cluster
+   metadata records the old version, peers' reconnects fall back to `CRC`.
+   Until then the downgraded node logs the generic handshake error for each
+   rejected attempt (it runs old code, so no `UnknownFramingException`).
+   Measure how long that window is.
 
 ### 4.5 Rollback story
 
-- Config-flag rollback: setting `internode_checksum_type: crc32` (or
-  removing the opt-in setting) on all nodes reverts all *new* connections
-  to CRC32 without a restart-order dependency — `framing(category)` is
-  re-evaluated whenever a connection pool's settings are built, not fixed
-  once at process startup for the whole node's lifetime.
-- Compatibility-mode rollback: setting `storage_compatibility_mode` back to
-  `UPGRADING` or a `CASSANDRA_N` value immediately disables `Framing.CRC32C`
-  selection cluster-wide, independent of the `internode_checksum_type`
-  setting — this is the "emergency stop" lever, and it's the same lever
-  operators already use to disable other not-yet-trusted post-4.0 behavior,
-  so no new operational knowledge is required.
-- Full downgrade rollback: downgrading the binary on a node reverts it to
-  code that has no `Framing.CRC32C` case at all — and, critically, no
-  `Framing.forId` hardening either, since that hardening ships in the *new*
-  code and cannot retroactively improve a downgraded binary. A peer still
-  configured with `crc32c` will therefore drive the downgraded node's
-  `forId` into its original `IllegalStateException`, which its generic
-  handshake error handling logs and closes on — repeatedly, as the peer
-  keeps reconnecting, with messaging between the pair down the whole time.
-  **Operational order therefore matters: set `internode_checksum_type:
-  crc32` (or a non-`NONE` `storage_compatibility_mode`) cluster-wide
-  *before* downgrading any binary.** The sending side's mid-handshake-close
-  WARN (§4.6a item 1 correction) is the signal that this order was violated.
-  No data is written to disk in a CRC32C-dependent format in this phase
-  (internode wire framing only), so rollback carries no data-loss risk,
-  only the connection-outage risk just described.
+- **Config rollback:** `internode_checksum_type` and
+  `storage_compatibility_mode` are read at startup, so changing either needs
+  a restart of that node. After the restart its pools use CRC32. Peers can
+  keep sending it CRC32C, because every node on the new release decodes both.
+  There is no runtime switch.
+- **Cluster-wide stop:** setting `storage_compatibility_mode: UPGRADING` and
+  doing a rolling restart turns CRC32C off on every node.
+- **Binary downgrade of one node:** handled by `withSafeFraming()` once
+  cluster metadata records the downgraded version (§4.4 item 5). Nothing is
+  written to disk in a CRC32C-dependent format in this phase, so there is no
+  data risk, only failed handshakes during that window. To avoid the
+  window entirely, set `internode_checksum_type: crc32` on every node (with
+  a restart) *before* downgrading any binary. The sending side's
+  mid-handshake-close WARN in `OutboundConnectionInitiator#channelInactive`
+  is the signal that a peer is rejecting CRC32C framing.
 
 ### 4.6a Resolved during domain-modeling review (2026-07-17)
 
@@ -842,10 +815,10 @@ plan) found three items §4.4/§4.5/§4.6 called for but that had not yet
 landed, and settled the open design questions attached to each:
 
 1. **Distinct failure classification is required, not optional.**
-   `Framing.forId(3)` on an old/misconfigured peer already throws
-   `UnknownFramingException` (extends `IOException`) instead of the
-   original design's unhandled `IllegalStateException` — that part of §4.6
-   item 1 is done. But tracing the call path
+   On a node running this code, `Framing.forId` throws
+   `UnknownFramingException` (extends `IOException`) for an unknown id,
+   instead of the plain `IllegalStateException` that released versions
+   throw. But tracing the call path
    (`HandshakeProtocol.Initiate.maybeDecode` →
    `InboundConnectionInitiator.Handler.initiate` → the class's generic
    `exceptionCaught`) showed it falls into the same catch-all as *every*
@@ -864,29 +837,30 @@ landed, and settled the open design questions attached to each:
    code**: the handshake framing field is 2 bits (`Initiate.encodeFlags`), and
    with `CRC32C(3)` all four encodable values now map to a `Framing`, so
    `forId` can only throw for ids that cannot be expressed on the wire (it
-   would become reachable if the id space is ever widened). In the real
-   "operator declared NONE too early" scenario the unknown id arrives at an
-   **old** node running **old** code, which throws its original
-   `IllegalStateException` into its generic handshake-failure logging — nothing
-   this branch ships can improve the old side's message. The actionable signal
-   therefore lives on the *sending* (new, misconfigured-relative-to-cluster)
-   node instead: `OutboundConnectionInitiator#channelInactive` emits a
+   would become reachable if the id space is ever widened). When an unknown
+   id does reach a node, it is an **old** node running **old** code, which
+   throws its original `IllegalStateException` into its generic
+   handshake-failure logging — nothing this branch ships can improve the old
+   side's message. With the peer-version gate (§4.1b) that only happens while
+   cluster metadata lags a downgrade. The actionable signal therefore lives on
+   the *sending* node: `OutboundConnectionInitiator#channelInactive` emits a
    dedicated no-spam WARN when a connection whose settings requested
-   `Framing.CRC32C` is closed mid-handshake, naming `internode_checksum_type`
-   and `storage_compatibility_mode` as the levers. That side is also the only
-   side an operator can fix without upgrading binaries.
+   `Framing.CRC32C` is closed mid-handshake, naming
+   `internode_checksum_type` as the lever. That side is also the only side an
+   operator can fix without changing binaries.
 2. **Outbound framing needs a per-peer metric.** No JMX/metrics artifact
    exposing "negotiated framing type" existed anywhere in the tree, which
    means the §4.4 item 3 mixed-version dtest ("verify via internode
    connection metrics/JMX exposing negotiated framing type per connection")
    could not actually be written as originally specified. Decision: add a
    `Gauge<String>` to `InternodeOutboundMetrics`, mirroring its existing
-   per-address `Gauge` pattern, reporting the current
-   `OutboundConnectionSettings.framing(category)` outcome for that peer.
-   (Granularity note: `framing(category)` only varies by
-   streaming-vs-messaging, and streaming is always `UNPROTECTED`, so one
-   gauge per peer is sufficient — small/large/urgent messaging connections
-   to the same peer always resolve to the same `Framing`.)
+   per-address `Gauge` pattern, reporting `OutboundConnections.framing()`:
+   the framing the small-messages connection uses, or the one its next
+   attempt will use. It reads the pool, not the current config, because a
+   pool's framing is fixed at creation (§4.1b). One gauge per peer is
+   enough: small, large and urgent messaging connections to the same peer
+   always resolve to the same `Framing`, and streaming is always
+   `UNPROTECTED`.
 3. **Inbound framing needs a matching per-peer metric.** The outbound
    gauge alone only shows what this node *chose to send*; it can't reveal
    a case where what's actually being decoded from a peer diverges from
@@ -902,23 +876,17 @@ landed, and settled the open design questions attached to each:
 Two distinct failure modes, both needing a clean, distinctly-logged
 rejection rather than falling through to generic corruption handling:
 
-1. **Framing-id decode failure** (new in this design): an old peer, or a
-   peer with `internode_checksum_type`/`storage_compatibility_mode`
-   misconfigured relative to its peers, receives a `Framing.forId(3)` it
-   can't decode. Per §4.4 item 4, this must be hardened to produce a
-   clean, specific rejection (e.g. an `UnknownFramingException` distinct
-   from `Crc.InvalidCrc`) rather than an unhandled `IllegalStateException`.
-   This is the primary risk this corrected design introduces, replacing
-   the "per-connection negotiation bug" risk the original (unworkable)
-   design would have had.
-2. **Checksum mismatch given correct framing** (the original concern):
-   once both sides agree on `Framing.CRC32C` (by construction, since
-   selection is compatibility-mode-gated rather than per-connection
-   negotiated, this should never desync between two `NONE`-mode peers
-   unless one has a stale/buggy config), a real CRC32C mismatch should
-   still be treated as a bona fide integrity failure — reusing the
-   existing `Crc.InvalidCrc`/connection-reset handling is correct here,
-   since there's no live negotiation state to second-guess.
+1. **Framing-id decode failure:** a peer receives `Framing.forId(3)` and
+   can't decode it. The peer-version check (§4.1b) prevents this whenever
+   cluster metadata is accurate, so the remaining cases are stale metadata,
+   chiefly the window after a binary downgrade (§4.4 item 5). The old peer
+   logs its generic handshake error, which this change cannot alter; the
+   sending node logs the mid-handshake-close WARN, and its reconnects fall
+   back to CRC32 once metadata records the downgrade.
+2. **Checksum mismatch given correct framing:** once both sides agree on
+   `Framing.CRC32C`, the receiver decodes exactly what the sender chose, so a
+   CRC32C mismatch is a real integrity failure. Reusing the existing
+   `Crc.InvalidCrc`/connection-reset handling is correct.
 
 ---
 
@@ -942,15 +910,15 @@ without any internode CRC32C rollout, and vice versa.
   time, not baked into this plan.
   `BETA = Optional.of(V_new)`, following the exact existing pattern at
   `ProtocolVersion.java:87-88`.
-- Implement the v5-spec-described-but-never-built framing layer in
-  `transport/` (currently absent per the inventory in §1(b)) using
-  `ChecksumType.CRC32C` from Phase 1, reusing (not duplicating)
-  `FrameEncoderCrc`/`FrameDecoderCrc` if their Phase-1 parameterization is
-  generic enough to be shared between `net` and `transport` packages, or a
-  thin `transport`-local wrapper if the packages' framing needs diverge
-  (header format, self-contained-frame semantics, etc. — determine during
-  implementation by diffing `net.FrameDecoder`'s header format against
-  `doc/native_protocol_v5.spec`'s section 2.3).
+- The v5 framing already exists: `PipelineConfigurator.frameDecoder`/
+  `frameEncoder` (lines 387-402) pick `net.FrameDecoderCrc`/`FrameEncoderCrc`
+  or the LZ4 variants by compression alone, for every protocol version that
+  uses framing (§1(b)). The new version needs those methods to take the
+  negotiated `ProtocolVersion` too, and to return a CRC32C codec for it.
+  Phase 2's `FrameEncoderCrc.getInstance(ChecksumType.CRC32C)` and
+  `FrameDecoderCrc.create(allocator, ChecksumType.CRC32C)` are a starting
+  point, but they keep the CRC24 header, so dropping CRC24 needs a codec with
+  a different header layout, not just a different trailer checksum.
 - CRC24 is not migrated, not parameterized, not touched — it is simply
   absent from the new v6/v7 framing header. Document the header format
   change explicitly in the spec (§5.2).
@@ -963,14 +931,14 @@ without any internode CRC32C rollout, and vice versa.
 New `doc/native_protocol_v6.spec` (or v7, per the ordinal decision above),
 derived from `doc/native_protocol_v5.spec`, with:
 - Section on frame framing (mirroring v5 spec lines ~84-173) rewritten:
-  drop the CRC24 header field entirely, keep a single CRC32C trailer
-  covering the whole frame (header + payload), matching how
-  `FrameEncoderCrc`/`FrameDecoderCrc` structure their non-LZ4 variant today
-  (single checksum, not split header/payload) — or preserve the
-  header/payload split if driver implementers prefer incremental
-  validation; this is an open design question to resolve with driver
-  maintainers before finalizing the spec text, not a decision this plan
-  makes unilaterally.
+  drop the CRC24 header field and keep a single CRC32C trailer covering the
+  whole frame (header + payload), or keep the v5 split (a header checksum,
+  so the length can be trusted before the payload arrives, plus a payload
+  trailer) with CRC32C in both places. Today's `FrameEncoderCrc` uses the
+  split: a CRC24 header check and a CRC32 payload trailer. Dropping the
+  header checksum means a corrupted length field is only detected after
+  reading up to 128KiB, which is the trade-off to settle with driver
+  maintainers before finalizing the spec text.
 - Explicit note in the "Changes from v5" preamble (the v5 spec has an
   equivalent "Changes from v4" section per existing convention) stating
   CRC24 is removed and why (CRC32C is JIT-intrinsified and a single
@@ -980,10 +948,11 @@ derived from `doc/native_protocol_v5.spec`, with:
 ### 5.3 Files to change
 
 - `transport/ProtocolVersion.java` — new version constant + beta flag.
-- `transport/PipelineConfigurator.java` — wire in new framing codec for
-  the new version.
-- New `transport/FrameEncoderCrc32c.java`/`FrameDecoderCrc32c.java` (or
-  shared `net` classes, per §5.1).
+- `transport/PipelineConfigurator.java` and `transport/SimpleClient.java` —
+  select the framing codec by protocol version as well as compression.
+- A new frame codec without the CRC24 header (in `net`, next to
+  `FrameEncoderCrc`, so both packages can share it), unless the spec keeps
+  the split header (§5.2).
 - `doc/native_protocol_v6.spec` (new file).
 - Driver-facing: none in this repo, but flagged as an external dependency
   (§5.4).
@@ -1008,13 +977,12 @@ protocol v6/v7 graduation out of beta to driver adoption count.
   `USE_BETA` + new version, confirming a non-opted-in client is rejected
   or downgraded per existing `Envelope.java:441` logic (extend the
   existing beta-rejection test, don't write a new mechanism).
-- cassandra-stress comparative run (§2.3) v5 vs v6/v7.
+- cassandra-stress comparative run (§2.4) v5 vs v6/v7.
 - Negative test: truncate/flip a byte in a v6/v7 frame and confirm a clean
-  protocol error (not a server crash, not silent acceptance) — the
-  transport layer today already must define this for CRC framing in
-  general; extend existing v5 CRC-failure tests (if the framing layer
-  exists there) or write the first one now since §1(b) found no existing
-  Java implementation of this to extend.
+  protocol error (not a server crash, not silent acceptance). Extend the
+  v5 framing coverage in `transport/CQLConnectionTest.java`, which already
+  exercises `FrameEncoderCrc`/`FrameDecoderCrc`, rather than starting a new
+  harness.
 
 ### 5.6 Rollback story
 
@@ -1101,8 +1069,8 @@ local `trunk`) rather than assumed:
   first-class supported target on both branches.
 - `cassandra-5.0` `build.xml:47-48`: `java.default=11`, `java.supported=11,17`.
 - `cassandra-6.0` `build.xml:47-48`: `java.default=11`, `java.supported=11,17,21`.
-- `cassandra-6.0` `CHANGES.txt` top entry: `6.0-alpha2` — **6.0 is pre-GA,
-  currently in alpha**, not yet released.
+- `cassandra-6.0` `CHANGES.txt` top entry: `6.0-alpha3` (upstream fetched
+  2026-10-11) — **6.0 is pre-GA, currently in alpha**, not yet released.
 - `cassandra-6.0`'s `net/MessagingService.java` has the **identical**
   `Version` enum as trunk today (top ordinal `VERSION_60(14)`,
   `maximum_version = VERSION_60`) — trunk has not diverged from the 6.0
@@ -1122,30 +1090,26 @@ local `trunk`) rather than assumed:
 | 4.0 (GA, bugfix-only) | JDK 8 or 11 (`java.version.8`/`java.version.11`, no `java.supported` gate) | No on JDK 8 (`CRC32C` class added JDK 9) — pure-Java fallback would **regress** vs today's intrinsic CRC32 when running on JDK 8 | **Nothing.** No plumbing, no CRC32C. | GA branches take bugfixes only, not features (ASF release policy); JDK 8 remains a live, supported target here, so even *offering* CRC32C risks a net performance loss for JDK-8 deployments (Phase 0's PureJavaCrc32C row quantifies this). |
 | 4.1 (GA, bugfix-only) | JDK 8 or 11, same as 4.0 | Same JDK-8 caveat as 4.0 | **Nothing.** | Same rationale as 4.0. |
 | 5.0 (GA, bugfix-only) | JDK 11 or 17 (`java.supported=11,17`) | Yes — JDK 11 floor means the intrinsic is always available | **Nothing new**, despite intrinsic availability. `MessagingService.maximum_version = VERSION_50` — no `VERSION_60`-equivalent negotiation slot even exists on this branch to attach CRC32C to. | Feature-vs-bugfix policy for GA branches; also, introducing a new negotiated `Framing`/`Version` value via a 5.0.x patch release would let two nodes both "on 5.0.x" refuse to interoperate depending on exact patch level — an upgrade-matrix cost disproportionate to the benefit. Phase 1 plumbing (behavior-preserving, no new negotiated capability) could theoretically be backported without this risk, but is not recommended and not part of this plan. |
-| 6.0 (**currently 6.0-alpha2, pre-GA**) | JDK 11, 17, or 21 (`java.supported=11,17,21`) | Yes | **Candidate for Phase 2 (internode CRC32C) and Phase 3 (protocol v6/v7 beta)**, if — and only if — 6.0 is still pre-GA (alpha/beta) when this work is implemented. Re-confirm 6.0's release stage at that time; once 6.0 ships GA it drops to the bugfix-only row above and misses this window. | 6.0 being alpha, not GA, is exactly the state in which the project's own precedent (every prior `VERSION_xx` ordinal) shows new negotiated capability gets introduced — during pre-GA development, not after. This is the **only** branch below trunk where shipping the new `MessagingService.Version` ordinal is both technically ready (JDK floor supports the intrinsic) and policy-compatible (still pre-GA). |
-| trunk (next major after 6.0; currently labeled 7.0 per `CHANGES.txt`; `MessagingService.Version` enum not yet bumped past 6.0's `VERSION_60` as of this writing, since trunk and 6.0 have not diverged on this file) | JDK 11, 17, or 21 (`build.xml:47-48`, identical to 6.0) | Yes | Same as 6.0 — **Phase 1 + Phase 2 + Phase 3** — trunk is always a valid target for new feature work regardless of what 6.0 does, and will inherit whatever new `MessagingService.Version` ordinal 6.0 introduces once/if 6.0 branches away from trunk. | Trunk is the perpetual feature-development line; if 6.0 goes GA before this work lands, trunk (as the emerging 7.0) becomes the *only* branch this targets, per the 6.0 row's caveat above. |
+| 6.0 (**currently 6.0-alpha3, pre-GA**) | JDK 11, 17, or 21 (`java.supported=11,17,21`) | Yes | **Candidate for Phase 2 (internode CRC32C) and Phase 3 (protocol v6/v7 beta)**, if — and only if — 6.0 is still pre-GA (alpha/beta) when this work is implemented. Re-confirm 6.0's release stage at that time; once 6.0 ships GA it drops to the bugfix-only row above and misses this window. | 6.0 being alpha, not GA, is the state in which the project introduces new wire capabilities. Phase 2 needs no new `MessagingService.Version`, but `CRC32C_FRAMING_SINCE` must then name the first 6.0 pre-release that carries it (§7 entry criteria). |
+| trunk (next major after 6.0; currently labeled 7.0 per `CHANGES.txt`; `MessagingService.Version` enum not yet bumped past 6.0's `VERSION_60` as of this writing, since trunk and 6.0 have not diverged on this file) | JDK 11, 17, or 21 (`build.xml:47-48`, identical to 6.0) | Yes | Same as 6.0 — **Phase 1 + Phase 2 + Phase 3** — trunk is always a valid target for new feature work regardless of what 6.0 does. The implementation targets trunk: `CRC32C_FRAMING_SINCE` is 7.0. | Trunk is the perpetual feature-development line; if 6.0 goes GA before this work lands, trunk (as the emerging 7.0) becomes the *only* branch this targets, per the 6.0 row's caveat above. |
 | Next major after whichever branch (6.0 or 7.0) first ships this | Same JDK floor as its predecessor, re-verify | Yes | `internode_checksum_type: crc32c` becomes the shipped **default** for fresh, all-`NONE`-mode clusters (see entry criteria below); protocol v6/v7 graduates out of beta if entry criteria are met. | This is the earliest point the capability can become the unconditional default, since every node on this line already understands it by definition — though the `StorageCompatibilityMode` gate mechanism itself persists, for whatever the *next* new capability turns out to need it. |
 
 ### Entry/exit criteria
 
-- **CRC32C internode framing available for opt-in**: first trunk commit
-  implementing Phase 2 (§4), immediately — an operator on an all-upgraded,
-  `storage_compatibility_mode: NONE` cluster can set
-  `internode_checksum_type: crc32c` right away. Note this is **not** a
-  `MessagingService` version-ordinal question per the §4.1a/§4.1b
-  correction: framing selection is gated by `StorageCompatibilityMode`,
-  not by a negotiated messaging version, so there is no "introduce the
-  ordinal, then later flip current_version" two-step for this feature the
-  way there was for `VERSION_60`.
+- **CRC32C internode framing available for opt-in**: from the release that
+  ships Phase 2 (§4). `CRC32C_FRAMING_SINCE` in
+  `OutboundConnectionSettings` must name that release. It is 7.0 today; if
+  the work lands in 6.0 instead, set it to the first 6.0 pre-release that
+  carries it, since earlier 6.0 alphas would otherwise pass the peer-version
+  check without being able to decode framing id 3. This is **not** a
+  `MessagingService` version-ordinal question: there is no "introduce the
+  ordinal, then later flip `current_version`" two-step for this feature.
 - **`internode_checksum_type: crc32c` becomes the shipped default**: only
-  after (a) the hardware-cohort question is weighed — the Phase 0 gate is
-  passed (§2.2 RUN 2, SSE4.2-era x86_64) but modern x86_64/arm64 measure
-  parity, see the §2.2 summary and §4.3 — and (b) the
-  dtests in §4.4 are green in CI (the `Framing.forId` hardening
-  in §4.4 item 4 / §4.6 item 1 is implemented; the dtests themselves are not). Recommend this happens no earlier than the
-  first alpha of the release that carries Phase 2, giving a full alpha/beta
-  soak period even though the mechanism itself doesn't require it — a
-  risk-management choice, not a technical requirement.
+  after (a) benchmarks show a gain on hardware the project's users still run,
+  which §2.2 does not yet show beyond Ivy Bridge (see §4.3), and (b) the
+  mixed-version dtests in §4.4 are green in CI. Recommend this happens no
+  earlier than the first alpha of the release after the one that carries
+  Phase 2, giving a full alpha/beta soak period.
 - **Protocol v6/v7 leaves the beta flag**: requires (a) Phase 0 gate
   passed, (b) protocol-level tests in §5.5 green, (c) **at least 2 actively
   maintained driver implementations** (recommend: the Java driver and one
@@ -1182,12 +1146,14 @@ local `trunk`) rather than assumed:
 ## 8. ADR: CRC32 → CRC32C migration approach
 
 **Context.** CASSANDRA-16360 observes that `java.util.zip.CRC32`, while
-JIT-intrinsified since early JDK versions on x86, computes a checksum
-algorithm (IEEE 802.3 CRC-32) that is not the one modern CPUs accelerate
-via a dedicated instruction — x86 SSE4.2's `crc32` instruction and ARMv8's
-CRC32C extension both implement the **Castagnoli (CRC32C)** polynomial, not
-IEEE CRC-32. `java.util.zip.CRC32C`, added in JDK 9, exposes this
-faster-in-hardware polynomial directly. Cassandra currently hardcodes CRC32
+JIT-intrinsified, computes IEEE 802.3 CRC-32, which x86 has no dedicated
+instruction for: SSE4.2's `crc32` instruction implements only the
+**Castagnoli (CRC32C)** polynomial, so the JDK's x86 CRC32 intrinsic folds
+with `pclmulqdq` instead. ARMv8's CRC extension has instructions for both
+polynomials. `java.util.zip.CRC32C`, added in JDK 9, uses the dedicated
+instruction directly. Phase 0 (§2.2) measured the effect: a 6.6–7.9× gain on
+Ivy Bridge, whose `pclmulqdq` is slow, and parity within ±1% on Zen 3 and
+Apple M1. Cassandra currently hardcodes CRC32
 (and, in native protocol v5 framing, also CRC24) across internode framing,
 the native client protocol spec, and on-disk formats (commit log, SSTable
 chunks, hints), all without a `ChecksumType`-style abstraction consistently
@@ -1196,9 +1162,9 @@ choice off a version negotiated with the reader.
 
 **Decision.** Migrate incrementally, per the four-phase plan above:
 plumbing first (Phase 1, behavior-preserving), then two independent
-opt-in rollouts gated by existing versioning mechanisms — internode
-messaging version negotiation (Phase 2) and native protocol beta-flag
-staging (Phase 3) — with on-disk formats deliberately deferred to a
+opt-in rollouts: internode framing gated by operator opt-in, compatibility
+mode and each peer's release version from cluster metadata (Phase 2), and
+native protocol beta-flag staging (Phase 3) — with on-disk formats deliberately deferred to a
 separate ticket (Phase 4) because they carry the highest risk of the
 migration (a mis-negotiated on-disk checksum reads as silent data
 corruption or data loss, not a clean protocol error, unlike the wire-level
@@ -1211,10 +1177,11 @@ this is quantified, not assumed, by Phase 0's benchmark gate before any
 Phase 2/3 code lands.
 
 **Consequences.**
-- Positive: CPU spent on checksums drops measurably (Phase 0's own gate
-  requires this to be proven, not asserted) on internode traffic and,
-  once drivers catch up, on client traffic, with zero risk to existing
-  clusters since every new behavior is opt-in and negotiated.
+- Positive: on CPUs with slow `pclmulqdq` (Sandy Bridge, Ivy Bridge), CPU
+  spent on internode checksums drops sharply, and on client traffic once
+  drivers catch up. On current hardware the effect is neutral (§2.2). Every
+  new behavior is opt-in, and internode CRC32C is only sent to peers known
+  to decode it.
   On-disk formats keep their current CRC32 cost until a separately-scoped
   Phase 4 lands, which is an accepted trade-off — on-disk checksums are
   computed far less frequently per byte transferred than wire framing (no
